@@ -1,0 +1,9 @@
+# Root-level environment deps only
+ipykernel>=6.29,<7
+jupyterlab>=4.2,<5
+kaggle>=1.6,<2
+matplotlib>=3.9,<4
+numpy>=1.26,<3
+pandas>=2.2,<3
+scikit-learn>=1.5,<2
+seaborn>=0.13,<0.14
