@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+*.pyc
+
+competitions/*/data/raw/
+competitions/*/data/processed/
+competitions/*/models/*.joblib
+competitions/*/models/*.pkl
+competitions/*/models/*.json
+competitions/*/submissions/*.csv
+!competitions/*/data/raw/.gitkeep
+!competitions/*/data/processed/.gitkeep
+!competitions/*/submissions/.gitkeep
