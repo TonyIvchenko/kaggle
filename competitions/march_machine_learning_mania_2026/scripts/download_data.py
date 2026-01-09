@@ -37,8 +37,17 @@ def kaggle_credentials_path() -> Path:
     return config_dir / "kaggle.json"
 
 
+def kaggle_access_token_path() -> Path:
+    config_dir = Path(os.environ.get("KAGGLE_CONFIG_DIR", Path.home() / ".kaggle"))
+    return config_dir / "access_token"
+
+
 def kaggle_credentials_configured() -> bool:
+    if os.environ.get("KAGGLE_API_TOKEN"):
+        return True
     if os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
+        return True
+    if kaggle_access_token_path().exists():
         return True
     return kaggle_credentials_path().exists()
 
@@ -56,7 +65,8 @@ def ensure_kaggle_credentials() -> None:
     if kaggle_credentials_configured():
         return
     raise RuntimeError(
-        "Kaggle credentials were not found. Create ~/.kaggle/kaggle.json or set KAGGLE_USERNAME and KAGGLE_KEY."
+        "Kaggle credentials were not found. Configure one of: "
+        "~/.kaggle/access_token, ~/.kaggle/kaggle.json, KAGGLE_API_TOKEN, or KAGGLE_USERNAME/KAGGLE_KEY."
     )
 
 
@@ -69,6 +79,40 @@ def extract_archives(raw_dir: Path) -> list[Path]:
     return extracted_files
 
 
+def build_download_error_message(competition: str, output: str) -> str:
+    if "401" in output and "Unauthorized" in output:
+        return (
+            "Kaggle CLI returned 401 Unauthorized while downloading competition data.\n"
+            "Most likely causes:\n"
+            "1. Your Kaggle credentials are invalid or expired.\n"
+            "2. You generated the wrong token type and need to regenerate it from Kaggle settings.\n"
+            "3. The competition rules have not been accepted in the browser yet.\n\n"
+            "Debug this in order:\n"
+            "  - Run: kaggle competitions list -s titanic\n"
+            "    If that also returns 401, regenerate credentials in https://www.kaggle.com/settings\n"
+            "  - If list works, open https://www.kaggle.com/competitions/"
+            f"{competition} and accept the competition rules.\n\n"
+            f"Original CLI output:\n{output}"
+        )
+    if "403" in output and "Forbidden" in output:
+        return (
+            "Kaggle CLI returned 403 Forbidden while downloading competition data.\n"
+            "Your credentials are probably valid, but this competition still is not downloadable for your account.\n\n"
+            "For March Machine Learning Mania 2026, Kaggle marks the competition as requiring both rules acceptance "
+            "and identity verification.\n"
+            "Check these in order:\n"
+            "  - Open https://www.kaggle.com/competitions/"
+            f"{competition} in the browser.\n"
+            "  - Click Join / Accept Rules if Kaggle shows that prompt.\n"
+            "  - Complete any requested account or identity verification on Kaggle.\n"
+            "  - Retry the CLI download after that.\n\n"
+            "The outdated-version warning is secondary; it is worth upgrading the kaggle package, but it is not the "
+            "main cause of a 403.\n\n"
+            f"Original CLI output:\n{output}"
+        )
+    return f"Kaggle download failed:\n{output}"
+
+
 def download_competition_data(competition: str, raw_dir: Path, force: bool = False) -> None:
     kaggle_exe = ensure_kaggle_cli_available()
     ensure_kaggle_credentials()
@@ -78,7 +122,14 @@ def download_competition_data(competition: str, raw_dir: Path, force: bool = Fal
     if force:
         command.append("--force")
 
-    subprocess.run(command, check=True)
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode == 0:
+        return
+
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    combined = "\n".join(part for part in [stdout, stderr] if part)
+    raise RuntimeError(build_download_error_message(competition=competition, output=combined))
 
 
 def main() -> None:
