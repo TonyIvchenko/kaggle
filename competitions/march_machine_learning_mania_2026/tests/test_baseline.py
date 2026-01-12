@@ -6,6 +6,7 @@ import pandas as pd
 
 from competitions.march_machine_learning_mania_2026.models.baseline import (
     TEAM_STAT_COLUMNS,
+    TorchCandidateConfig,
     build_datasets,
     build_matchup_features,
     build_team_stats,
@@ -172,14 +173,55 @@ def test_holdout_training_and_submission_generation(tmp_path: Path):
     raw_dir = _prepare_competition_dir(tmp_path)
     files = discover_competition_files(raw_dir)
     training_frame, submission_frame, _ = build_datasets(files)
+    candidates = [
+        TorchCandidateConfig(
+            name="test_linear",
+            architecture="linear",
+            hidden_dims=(),
+            dropout=0.0,
+            learning_rate=0.01,
+            weight_decay=1e-4,
+            batch_size=32,
+            epochs=20,
+            patience=5,
+            label_smoothing=0.0,
+        ),
+        TorchCandidateConfig(
+            name="test_mlp",
+            architecture="mlp",
+            hidden_dims=(32, 16),
+            dropout=0.1,
+            learning_rate=0.005,
+            weight_decay=5e-4,
+            batch_size=32,
+            epochs=25,
+            patience=6,
+            label_smoothing=0.01,
+        ),
+    ]
 
     holdout_season = default_holdout_season(training_frame, target_season=2026)
     assert holdout_season == 2025
 
-    _, metrics, _ = fit_and_score_holdout(training_frame, target_season=2026, holdout_season=holdout_season)
-    final_model = fit_final_model(training_frame, target_season=2026)
-    submission = generate_submission(final_model, submission_frame)
+    _, metrics, _ = fit_and_score_holdout(
+        training_frame,
+        target_season=2026,
+        holdout_season=holdout_season,
+        device_preference="cpu",
+        seed=123,
+        candidate_configs=candidates,
+    )
+    final_model = fit_final_model(
+        training_frame,
+        target_season=2026,
+        device_preference="cpu",
+        seed=123,
+        selected_configs=[candidate.__dict__.copy() for candidate in candidates],
+    )
+    submission = generate_submission(final_model, submission_frame, device_preference="cpu")
 
     assert 0.0 <= metrics["mse"] <= 1.0
+    assert metrics["candidate_metrics"]
+    assert final_model["device_used"] == "cpu"
     assert list(submission.columns) == ["ID", "Pred"]
     assert submission["Pred"].between(0.025, 0.975).all()

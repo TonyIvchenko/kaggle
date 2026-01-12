@@ -2,11 +2,17 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 *.pyc
+.DS_Store
+.kaggle/
+**/.kaggle/
+kaggle.json
+**/kaggle.json
 
 competitions/*/data/raw/*
 competitions/*/data/processed/*
 competitions/*/models/*.joblib
 competitions/*/models/*.pkl
+competitions/*/models/*.pt
 competitions/*/models/*.json
 competitions/*/submissions/*.csv
 !competitions/*/data/raw/.gitkeep
