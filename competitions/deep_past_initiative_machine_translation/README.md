@@ -24,3 +24,18 @@ python competitions/deep_past_initiative_machine_translation/scripts/train_model
 By default, the downloader only pulls `train.csv`, `test.csv`, and `sample_submission.csv`.
 Use `--all-files` to fetch every competition file (includes large supplemental resources).
 
+If download returns `403 Forbidden`, open the competition page in your browser and complete:
+
+1. Join / Accept Rules: https://www.kaggle.com/competitions/deep-past-initiative-machine-translation
+2. Account verification (if prompted): https://www.kaggle.com/settings
+
+## Training Notes
+
+- Holdout metrics reported by the trainer are:
+  - `char_f1`
+  - `sequence_ratio`
+  - `exact_match`
+- Candidate strategies:
+  - character TF-IDF retriever
+  - PyTorch bi-encoder retriever (MPS/CPU)
+  - confidence-threshold hybrid of both
