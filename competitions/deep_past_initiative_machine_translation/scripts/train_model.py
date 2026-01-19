@@ -84,7 +84,7 @@ def main() -> None:
     test_pairs_path = args.processed_dir / "test_texts.csv"
     holdout_predictions_path = args.processed_dir / "holdout_predictions.csv"
 
-    train_pairs = dataset.train_frame[[dataset.id_column, *dataset.source_columns, dataset.target_column]].copy()
+    train_pairs = dataset.train_frame[[dataset.train_id_column, *dataset.source_columns, dataset.target_column]].copy()
     train_pairs["source_text"] = dataset.train_source_texts
     test_pairs = dataset.test_frame[[dataset.id_column, *dataset.source_columns]].copy()
     test_pairs["source_text"] = dataset.test_source_texts
@@ -118,6 +118,7 @@ def main() -> None:
         "competition": COMPETITION_SLUG,
         "training_rows": int(len(dataset.train_frame)),
         "test_rows": int(len(dataset.test_frame)),
+        "train_id_column": dataset.train_id_column,
         "id_column": dataset.id_column,
         "target_column": dataset.target_column,
         "source_columns": list(dataset.source_columns),
@@ -150,4 +151,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
