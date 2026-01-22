@@ -1,72 +1,122 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 
 from competitions.deep_past_initiative_machine_translation.scripts.build_doc_memory_submission import (
-    _best_sentence_partition,
+    SentenceDoc,
+    _align_rows_to_doc,
+    _build_grouped_test_indices,
     _build_submission,
-    _group_test_rows,
-    _split_sentences,
 )
 
 
-def test_split_sentences_preserves_quote_boundaries():
-    text = 'One sentence. Another sentence?" Final fragment.'
-    sentences = _split_sentences(text)
-    assert sentences == ["One sentence.", 'Another sentence?"', "Final fragment."]
+@dataclass
+class _MockDataset:
+    train_source_texts: list[str]
+    train_targets: list[str]
+    test_source_texts: list[str]
+    test_frame: pd.DataFrame
+    sample_submission: pd.DataFrame
+    id_column: str = "id"
+    target_column: str = "translation"
 
 
-def test_best_sentence_partition_returns_contiguous_spans():
-    spans = _best_sentence_partition(
-        sentence_lengths=[10, 12, 30, 7],
-        source_lengths=[11, 13, 35],
-    )
-    assert spans == [(0, 1), (1, 2), (2, 4)]
-
-
-def test_build_submission_uses_document_partition_for_grouped_rows():
-    train = pd.DataFrame(
+def test_build_grouped_test_indices_uses_text_id_order():
+    frame = pd.DataFrame(
         [
-            {
-                "oare_id": "doc-main",
-                "transliteration": "tokA tokB tokC tokD tokE tokF tokG tokH tokI tokJ",
-                "translation": "Alpha sentence. Beta sentence. Gamma sentence. Delta sentence.",
-            },
-            {
-                "oare_id": "noise",
-                "transliteration": "completely unrelated source row",
-                "translation": "noise translation",
-            },
+            {"id": 2, "text_id": "b", "line_start": 4},
+            {"id": 1, "text_id": "a", "line_start": 7},
+            {"id": 0, "text_id": "a", "line_start": 1},
         ]
     )
+    groups = _build_grouped_test_indices(frame)
+    assert groups == [[2, 1], [0]]
+
+
+def test_align_rows_to_doc_allows_partial_doc_alignment():
+    doc = SentenceDoc(
+        text_uuid="doc-main",
+        source_sentences=["tokA tokB", "tokC tokD", "tokE tokF", "tokG tokH"],
+        target_sentences=["A", "B", "C", "D"],
+        concatenated_source="tokA tokB tokC tokD tokE tokF tokG tokH",
+    )
+    rows = ["tokC tokD tokE tokF", "tokG tokH"]
+    aligned = _align_rows_to_doc(row_sources=rows, doc=doc, length_penalty=0.12)
+    assert aligned is not None
+    _, predictions, spans = aligned
+    assert predictions == ["B C", "D"]
+    assert spans == [(1, 3), (3, 4)]
+
+
+def test_build_submission_prefers_document_alignment_when_confident():
     test = pd.DataFrame(
         [
-            {"id": 1, "text_id": "txt", "line_start": 1, "line_end": 2, "transliteration": "tokA tokB tokC"},
-            {"id": 2, "text_id": "txt", "line_start": 2, "line_end": 4, "transliteration": "tokD tokE tokF tokG"},
-            {"id": 3, "text_id": "txt", "line_start": 4, "line_end": 6, "transliteration": "tokH tokI tokJ"},
+            {"id": 1, "text_id": "x", "line_start": 1, "line_end": 2, "transliteration": "tokA tokB"},
+            {"id": 2, "text_id": "x", "line_start": 2, "line_end": 3, "transliteration": "tokC tokD tokE"},
         ]
     )
-    sample_submission = pd.DataFrame({"id": [1, 2, 3], "translation": ["", "", ""]})
+    dataset = _MockDataset(
+        train_source_texts=["fallback source"],
+        train_targets=["fallback translation"],
+        test_source_texts=test["transliteration"].tolist(),
+        test_frame=test,
+        sample_submission=pd.DataFrame({"id": [1, 2], "translation": ["", ""]}),
+    )
+    sentence_docs = {
+        "doc-main": SentenceDoc(
+            text_uuid="doc-main",
+            source_sentences=["tokA tokB", "tokC tokD tokE", "tokF tokG"],
+            target_sentences=["Alpha", "Beta", "Gamma"],
+            concatenated_source="tokA tokB tokC tokD tokE tokF tokG",
+        )
+    }
 
     submission, report = _build_submission(
-        train=train,
-        test=test,
-        sample_submission=sample_submission,
-        id_column="id",
-        target_column="translation",
-        source_columns=("transliteration",),
-        doc_match_threshold=0.2,
-        top_k=2,
+        dataset=dataset,
+        sentence_docs=sentence_docs,
+        top_k_docs=4,
+        length_penalty=0.12,
+        doc_score_weight=0.8,
+        min_doc_blend_score=-1.0,
     )
 
-    assert report[0]["strategy"] == "document_partition"
-    assert list(submission["id"]) == [1, 2, 3]
-    assert submission.loc[0, "translation"] == "Alpha sentence."
-    assert "Beta sentence." in submission.loc[1, "translation"]
-    assert "Delta sentence." in submission.loc[2, "translation"]
+    assert report[0]["strategy"] == "document_alignment"
+    assert list(submission["translation"]) == ["Alpha", "Beta"]
 
 
-def test_group_test_rows_without_text_id_returns_singletons():
-    frame = pd.DataFrame([{"id": 1}, {"id": 2}, {"id": 3}])
-    groups = _group_test_rows(frame)
-    assert groups == [[0], [1], [2]]
+def test_build_submission_uses_row_fallback_when_doc_score_is_below_threshold():
+    test = pd.DataFrame(
+        [
+            {"id": 1, "text_id": "x", "line_start": 1, "line_end": 2, "transliteration": "rare source term"},
+            {"id": 2, "text_id": "x", "line_start": 2, "line_end": 3, "transliteration": "unknown source term"},
+        ]
+    )
+    dataset = _MockDataset(
+        train_source_texts=["rare source term", "unknown source term"],
+        train_targets=["fallback one", "fallback two"],
+        test_source_texts=test["transliteration"].tolist(),
+        test_frame=test,
+        sample_submission=pd.DataFrame({"id": [1, 2], "translation": ["", ""]}),
+    )
+    sentence_docs = {
+        "doc-main": SentenceDoc(
+            text_uuid="doc-main",
+            source_sentences=["tokA tokB", "tokC tokD"],
+            target_sentences=["Alpha", "Beta"],
+            concatenated_source="tokA tokB tokC tokD",
+        )
+    }
+
+    submission, report = _build_submission(
+        dataset=dataset,
+        sentence_docs=sentence_docs,
+        top_k_docs=2,
+        length_penalty=0.12,
+        doc_score_weight=0.8,
+        min_doc_blend_score=1_000.0,
+    )
+
+    assert report[0]["strategy"] == "row_retrieval"
+    assert list(submission["translation"]) == ["fallback one", "fallback two"]
