@@ -1,31 +1,18 @@
-"""Build a line-aware, all-files submission for Deep Past Initiative."""
+"""Kaggle notebook source for Deep Past Initiative all-files submission."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from competitions.deep_past_initiative_machine_translation.models.baseline import (  # noqa: E402
-    DEFAULT_RAW_DIR,
-    build_datasets,
-    discover_competition_files,
-)
 
 
 SENTENCE_FILE = "Sentences_Oare_FirstWord_LinNum.csv"
@@ -35,6 +22,20 @@ DICTIONARY_FILE = "eBL_Dictionary.csv"
 PUBLICATIONS_FILE = "publications.csv"
 BIBLIOGRAPHY_FILE = "bibliography.csv"
 RESOURCES_FILE = "resources.csv"
+
+
+@dataclass(frozen=True)
+class DatasetBundle:
+    train_frame: pd.DataFrame
+    test_frame: pd.DataFrame
+    sample_submission: pd.DataFrame
+    train_id_column: str
+    id_column: str
+    target_column: str
+    source_columns: tuple[str, ...]
+    train_source_texts: list[str]
+    test_source_texts: list[str]
+    train_targets: list[str]
 
 
 @dataclass(frozen=True)
@@ -72,7 +73,7 @@ def _normalize_english(text: str) -> str:
     value = _clean_text(text).lower()
     value = unicodedata.normalize("NFKD", value)
     value = "".join(char for char in value if not unicodedata.combining(char))
-    value = re.sub(r"[^a-z0-9\s]", " ", value)
+    value = re.sub(r"[^a-z0-9\\s]", " ", value)
     return " ".join(value.split())
 
 
@@ -94,16 +95,157 @@ def _split_translation_sentences(text: str) -> list[str]:
     return parts if parts else [normalized]
 
 
+def _choose_id_column(train: pd.DataFrame, test: pd.DataFrame, sample_submission: pd.DataFrame) -> str:
+    preferred = ("id", "ID", "Id")
+    test_columns = set(test.columns)
+    sample_columns = set(sample_submission.columns)
+    for column in preferred:
+        if column in test_columns and column in sample_columns:
+            return column
+
+    shared = [column for column in sample_submission.columns if column in test_columns]
+    if not shared:
+        raise ValueError("Could not infer id column: no shared columns between sample submission and test set.")
+
+    for column in shared:
+        if column in train.columns:
+            return str(column)
+    return str(shared[0])
+
+
+def _choose_target_column(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    sample_submission: pd.DataFrame,
+    id_column: str,
+) -> str:
+    candidates = [column for column in sample_submission.columns if column != id_column]
+    if len(candidates) == 1:
+        return str(candidates[0])
+    for column in candidates:
+        if column in train.columns and column not in test.columns:
+            return str(column)
+    for column in candidates:
+        if column in train.columns:
+            return str(column)
+
+    train_only = [column for column in train.columns if column not in test.columns and column != id_column]
+    if len(train_only) == 1:
+        return str(train_only[0])
+    raise ValueError("Could not infer target column from train/test/sample_submission schema.")
+
+
+def _choose_source_columns(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    id_column: str,
+    target_column: str,
+) -> tuple[str, ...]:
+    columns = [column for column in test.columns if column != id_column and column in train.columns]
+    columns = [column for column in columns if column != target_column]
+    if not columns:
+        fallback = [column for column in train.columns if column not in {id_column, target_column}]
+        if not fallback:
+            raise ValueError("Could not infer source columns.")
+        columns = fallback
+    return tuple(str(column) for column in columns)
+
+
+def _choose_train_id_column(train: pd.DataFrame, submission_id_column: str, target_column: str) -> str | None:
+    if submission_id_column in train.columns and submission_id_column != target_column:
+        return submission_id_column
+
+    preferred = ("oare_id", "train_id", "id", "ID", "Id")
+    for column in preferred:
+        if column in train.columns and column != target_column:
+            return str(column)
+
+    id_like = [
+        column
+        for column in train.columns
+        if column != target_column and ("_id" in str(column).lower() or str(column).lower().endswith("id"))
+    ]
+    if id_like:
+        return str(id_like[0])
+    return None
+
+
+def _combine_source_columns(frame: pd.DataFrame, source_columns: tuple[str, ...]) -> list[str]:
+    parts = [frame[column].map(_clean_text) for column in source_columns]
+    merged: list[str] = []
+    for row_values in zip(*parts):
+        tokens = [f"{column}:{value}" for column, value in zip(source_columns, row_values, strict=True) if value]
+        merged.append(" | ".join(tokens) if tokens else "")
+    return merged
+
+
+def _build_dataset(raw_dir: Path) -> DatasetBundle:
+    train = pd.read_csv(raw_dir / "train.csv")
+    test = pd.read_csv(raw_dir / "test.csv")
+    sample_submission = pd.read_csv(raw_dir / "sample_submission.csv")
+
+    id_column = _choose_id_column(train, test, sample_submission)
+    target_column = _choose_target_column(train, test, sample_submission, id_column=id_column)
+    source_columns = _choose_source_columns(train, test, id_column=id_column, target_column=target_column)
+
+    train_work = train.copy()
+    train_id_column = _choose_train_id_column(train_work, submission_id_column=id_column, target_column=target_column)
+    if train_id_column is None:
+        train_id_column = "_row_id"
+        train_work[train_id_column] = np.arange(len(train_work), dtype=np.int64)
+
+    train_targets = train_work[target_column].map(_clean_text).tolist()
+    train_sources = _combine_source_columns(train_work, source_columns=source_columns)
+    test_sources = _combine_source_columns(test, source_columns=source_columns)
+
+    return DatasetBundle(
+        train_frame=train_work,
+        test_frame=test.copy(),
+        sample_submission=sample_submission.copy(),
+        train_id_column=train_id_column,
+        id_column=id_column,
+        target_column=target_column,
+        source_columns=source_columns,
+        train_source_texts=train_sources,
+        test_source_texts=test_sources,
+        train_targets=train_targets,
+    )
+
+
+def _discover_data_dir() -> Path:
+    kaggle_root = Path("/kaggle/input")
+    if kaggle_root.exists():
+        candidates: list[Path] = []
+        for train_path in kaggle_root.rglob("train.csv"):
+            parent = train_path.parent
+            if (parent / "test.csv").exists() and (parent / "sample_submission.csv").exists():
+                candidates.append(parent)
+        if candidates:
+            return sorted(candidates, key=lambda path: str(path))[0]
+
+    local_candidates = [
+        Path.cwd() / "competitions" / "deep_past_initiative_machine_translation" / "data" / "raw",
+        Path.cwd() / "data" / "raw",
+        Path.cwd(),
+    ]
+    for candidate in local_candidates:
+        if (candidate / "train.csv").exists() and (candidate / "test.csv").exists() and (candidate / "sample_submission.csv").exists():
+            return candidate
+
+    raise FileNotFoundError("Could not find train/test/sample_submission in /kaggle/input or local paths.")
+
+
 def _load_lexicon_normalizer(raw_dir: Path) -> dict[str, str]:
     mapping: dict[str, str] = {}
     lex_path = raw_dir / LEXICON_FILE
     if lex_path.exists():
-        lexicon = pd.read_csv(lex_path, usecols=["form", "norm"])
-        for row in lexicon.itertuples(index=False):
-            form = _clean_text(row.form)
-            norm = _clean_text(row.norm)
-            if form and norm:
-                mapping.setdefault(form, norm)
+        lexicon = pd.read_csv(lex_path)
+        if {"form", "norm"}.issubset(set(lexicon.columns)):
+            for row in lexicon.itertuples(index=False):
+                form = _clean_text(getattr(row, "form", ""))
+                norm = _clean_text(getattr(row, "norm", ""))
+                if form and norm:
+                    mapping.setdefault(form, norm)
     return mapping
 
 
@@ -138,7 +280,7 @@ def _build_sentence_docs(
     published_path = raw_dir / PUBLISHED_TEXTS_FILE
     if not sentences_path.exists() or not published_path.exists():
         raise FileNotFoundError(
-            "Supplemental files missing. Run downloader with --all-files to include sentence metadata."
+            "Supplemental files missing. Expected Sentences_Oare_FirstWord_LinNum.csv and published_texts.csv."
         )
 
     sentence_frame = pd.read_csv(sentences_path)
@@ -336,34 +478,34 @@ def _build_auxiliary_english_vocab(raw_dir: Path, train_targets: list[str]) -> s
 
     dictionary_path = raw_dir / DICTIONARY_FILE
     if dictionary_path.exists():
-        dictionary = pd.read_csv(dictionary_path, usecols=["definition"])
-        corpus.extend(_normalize_english(value) for value in dictionary["definition"].astype(str).tolist())
+        dictionary = pd.read_csv(dictionary_path)
+        for column in ("definition", "gloss", "sense"):
+            if column in dictionary.columns:
+                corpus.extend(_normalize_english(value) for value in dictionary[column].astype(str).tolist())
 
     publications_path = raw_dir / PUBLICATIONS_FILE
     if publications_path.exists():
-        publications = pd.read_csv(publications_path, usecols=["page_text", "has_akkadian"], nrows=4000)
-        page_texts = publications.loc[~publications["has_akkadian"].fillna(False), "page_text"].astype(str).tolist()
-        corpus.extend(_normalize_english(text) for text in page_texts)
+        publications = pd.read_csv(publications_path, nrows=4000)
+        if "page_text" in publications.columns:
+            if "has_akkadian" in publications.columns:
+                page_texts = publications.loc[~publications["has_akkadian"].fillna(False), "page_text"].astype(str).tolist()
+            else:
+                page_texts = publications["page_text"].astype(str).tolist()
+            corpus.extend(_normalize_english(text) for text in page_texts)
 
     bibliography_path = raw_dir / BIBLIOGRAPHY_FILE
     if bibliography_path.exists():
-        bibliography = pd.read_csv(bibliography_path, usecols=["title"])
-        corpus.extend(_normalize_english(title) for title in bibliography["title"].astype(str).tolist())
+        bibliography = pd.read_csv(bibliography_path)
+        for column in ("title", "Title"):
+            if column in bibliography.columns:
+                corpus.extend(_normalize_english(value) for value in bibliography[column].astype(str).tolist())
 
     resources_path = raw_dir / RESOURCES_FILE
     if resources_path.exists():
-        resources = pd.read_csv(
-            resources_path,
-            usecols=[
-                "Title",
-                "English abstract for non-English or N/A papers",
-            ],
-        )
-        corpus.extend(_normalize_english(value) for value in resources["Title"].astype(str).tolist())
-        corpus.extend(
-            _normalize_english(value)
-            for value in resources["English abstract for non-English or N/A papers"].astype(str).tolist()
-        )
+        resources = pd.read_csv(resources_path)
+        for column in ("Title", "English abstract for non-English or N/A papers"):
+            if column in resources.columns:
+                corpus.extend(_normalize_english(value) for value in resources[column].astype(str).tolist())
 
     vocab: set[str] = set()
     for text in corpus:
@@ -397,7 +539,7 @@ def _difflib_ratio(a: str, b: str) -> float:
 
 
 def _build_row_fallback_memory(
-    dataset: Any,
+    dataset: DatasetBundle,
     token_normalizer: dict[str, str],
     train_style_mappings: dict[str, TrainStyleMapping],
     sentence_docs: dict[str, SentenceDoc],
@@ -450,7 +592,7 @@ def _build_row_fallback_memory(
     return vectorizer, matrix, targets
 
 
-def _normalize_dataset_source_rows(dataset: Any, token_normalizer: dict[str, str]) -> tuple[list[str], list[str]]:
+def _normalize_dataset_source_rows(dataset: DatasetBundle, token_normalizer: dict[str, str]) -> tuple[list[str], list[str]]:
     train_norm = [_normalize_transliteration(text, token_normalizer) for text in dataset.train_source_texts]
     test_norm = [_normalize_transliteration(text, token_normalizer) for text in dataset.test_source_texts]
     return train_norm, test_norm
@@ -524,7 +666,7 @@ def _predict_for_candidate_doc(
 
 
 def _build_submission(
-    dataset: Any,
+    dataset: DatasetBundle,
     raw_dir: Path,
     top_k_docs: int,
     token_normalizer: dict[str, str],
@@ -681,51 +823,62 @@ def _build_submission(
     return ordered, report_rows
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build line-aware all-files submission.")
-    parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR, help="Directory with competition files.")
-    parser.add_argument(
-        "--submission-path",
-        type=Path,
-        default=Path(__file__).resolve().parents[1] / "submissions" / "submission_doc_memory.csv",
-        help="Output submission CSV path.",
-    )
-    parser.add_argument(
-        "--report-path",
-        type=Path,
-        default=Path(__file__).resolve().parents[1] / "models" / "submission_doc_memory_report.json",
-        help="Output diagnostics report path.",
-    )
-    parser.add_argument("--top-k-docs", type=int, default=8, help="Number of candidate docs to evaluate per group.")
-    return parser.parse_args()
-
-
 def main() -> None:
-    args = parse_args()
-    if args.top_k_docs < 1:
-        raise ValueError("--top-k-docs must be >= 1.")
+    data_dir = _discover_data_dir()
+    expected_files = [
+        "sample_submission.csv",
+        BIBLIOGRAPHY_FILE,
+        PUBLICATIONS_FILE,
+        SENTENCE_FILE,
+        LEXICON_FILE,
+        DICTIONARY_FILE,
+        "train.csv",
+        "test.csv",
+        PUBLISHED_TEXTS_FILE,
+        RESOURCES_FILE,
+    ]
 
-    files = discover_competition_files(args.raw_dir)
-    dataset = build_datasets(files)
-    token_normalizer = _load_lexicon_normalizer(args.raw_dir)
+    print(f"Using data dir: {data_dir}")
+    print("Input file check:")
+    for name in expected_files:
+        print(f"  {name}: {'ok' if (data_dir / name).exists() else 'missing'}")
 
+    dataset = _build_dataset(data_dir)
+    token_normalizer = _load_lexicon_normalizer(data_dir)
     submission, report = _build_submission(
         dataset=dataset,
-        raw_dir=args.raw_dir,
-        top_k_docs=int(args.top_k_docs),
+        raw_dir=data_dir,
+        top_k_docs=8,
         token_normalizer=token_normalizer,
     )
 
-    args.submission_path.parent.mkdir(parents=True, exist_ok=True)
-    args.report_path.parent.mkdir(parents=True, exist_ok=True)
-    submission.to_csv(args.submission_path, index=False)
-    args.report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if Path("/kaggle/working").exists():
+        output_dir = Path("/kaggle/working")
+    else:
+        output_dir = Path.cwd()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Saved submission to: {args.submission_path}")
-    print(f"Saved report to: {args.report_path}")
-    print("Submission preview:")
+    submission_path = output_dir / "submission.csv"
+    report_path = output_dir / "submission_report.json"
+    submission.to_csv(submission_path, index=False)
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    strategies = {}
+    for row in report:
+        strategy = str(row["strategy"])
+        strategies[strategy] = strategies.get(strategy, 0) + 1
+
+    print("\nSchema:")
+    print("  id column:", dataset.id_column)
+    print("  target column:", dataset.target_column)
+    print("  source columns:", list(dataset.source_columns))
+    print("  train rows:", len(dataset.train_frame), "test rows:", len(dataset.test_frame))
+    print("  grouped texts:", len(report))
+    print("  strategies:", strategies)
+    print("\nSubmission preview:")
     print(submission.head(20).to_string(index=False))
+    print(f"\nSaved submission: {submission_path}")
+    print(f"Saved report: {report_path}")
 
 
-if __name__ == "__main__":
-    main()
+main()
