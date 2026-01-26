@@ -115,6 +115,7 @@ def main() -> None:
     if dataset.task_type == "classification":
         print(
             "Holdout metrics: "
+            f"auc={holdout_metrics.get('auc', float('nan')):.6f}, "
             f"accuracy={holdout_metrics['accuracy']:.6f}, "
             f"log_loss={holdout_metrics['log_loss']:.6f}"
         )
@@ -128,7 +129,8 @@ def main() -> None:
     for row in holdout_metrics["strategy_metrics"]:
         if dataset.task_type == "classification":
             print(
-                f"  - {row['name']}: accuracy={row['accuracy']:.6f}, "
+                f"  - {row['name']}: auc={row.get('auc', float('nan')):.6f}, "
+                f"accuracy={row['accuracy']:.6f}, "
                 f"log_loss={row['log_loss']:.6f}, score={row['score']:.6f}"
             )
         else:
@@ -140,4 +142,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
