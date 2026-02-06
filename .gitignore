@@ -15,6 +15,7 @@ competitions/*/models/*.pkl
 competitions/*/models/*.pt
 competitions/*/models/*.json
 competitions/*/submissions/*.csv
+competitions/*/submissions/*.zip
 !competitions/*/data/raw/.gitkeep
 !competitions/*/data/processed/.gitkeep
 !competitions/*/submissions/.gitkeep

@@ -25,4 +25,6 @@ python competitions/gan_getting_started/scripts/train_model.py
 - Baseline submission script uses raw `photo_jpg` images as placeholders and renames
   them to `00000.jpg`, `00001.jpg`, ... inside `images.zip`.
 - This baseline is for pipeline validation; it is not competitive.
-
+- This competition is notebook-submission-only on Kaggle:
+  - local `kaggle competitions submit` is rejected
+  - run a notebook on Kaggle that writes `/kaggle/working/images.zip` and submit that version
