@@ -14,6 +14,7 @@ competitions/*/models/*.joblib
 competitions/*/models/*.pkl
 competitions/*/models/*.pt
 competitions/*/models/*.json
+competitions/deep_past_initiative_machine_translation/models/transformer_editor/
 competitions/*/submissions/*.csv
 competitions/*/submissions/*.zip
 !competitions/*/data/raw/.gitkeep

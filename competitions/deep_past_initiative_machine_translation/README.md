@@ -11,6 +11,7 @@ Workspace for the Kaggle competition:
 - `scripts/download_data.py`: downloads competition files via Kaggle CLI
 - `scripts/train_model.py`: trains/evaluates baseline models and writes a submission
 - `scripts/build_doc_memory_submission.py`: document-level translation memory submission builder
+- `scripts/train_transformer_editor.py`: pretrained transformer editor (`source + draft -> final`) with accelerator support
 - `models/baseline.py`: feature prep, retrieval models, training, and inference
 - `notebooks/deep_past_initiative_machine_translation.ipynb`: EDA + evaluation notebook
 - `tests/`: unit tests for downloader and model pipeline
@@ -21,6 +22,7 @@ Workspace for the Kaggle competition:
 python competitions/deep_past_initiative_machine_translation/scripts/download_data.py --all-files
 python competitions/deep_past_initiative_machine_translation/scripts/train_model.py --device-preference mps
 python competitions/deep_past_initiative_machine_translation/scripts/build_doc_memory_submission.py
+python competitions/deep_past_initiative_machine_translation/scripts/train_transformer_editor.py --device-preference auto
 ```
 
 By default, the downloader only pulls `train.csv`, `test.csv`, and `sample_submission.csv`.
@@ -65,3 +67,26 @@ It writes:
 
 - submission CSV: `submissions/submission_doc_memory.csv`
 - diagnostics report: `models/submission_doc_memory_report.json`
+
+## Transformer Editor Strategy
+
+`train_transformer_editor.py` adds a pretrained seq2seq stage:
+
+1. Builds nearest-neighbor retrieval drafts from train data (plus optional supplemental sentence memory).
+2. Fine-tunes `google/byt5-small` (or another HF seq2seq model) on prompts:
+   - source transliteration
+   - retrieval draft
+   - target translation
+3. Evaluates holdout with:
+   - `char_f1`, `sequence_ratio`, `exact_match`
+   - `BLEU`, `chrF++`
+4. Trains on full train set and exports:
+   - submission CSV: `submissions/submission_transformer_editor.csv`
+   - metrics: `models/transformer_editor_metrics.json`
+   - model artifacts: `models/transformer_editor/`
+
+Device options:
+
+- local Mac: `--device-preference mps`
+- Kaggle GPU notebook: `--device-preference cuda`
+- automatic: `--device-preference auto`
