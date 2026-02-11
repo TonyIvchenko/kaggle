@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-import re
 from typing import Any
+import warnings
 
 import joblib
 import numpy as np
@@ -54,6 +54,22 @@ class CandidateMetrics:
     name: str
     accuracy: float
     log_loss: float | None
+
+
+def _xgboost_available() -> bool:
+    try:
+        import xgboost  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _lightgbm_available() -> bool:
+    try:
+        import lightgbm  # noqa: F401
+    except Exception:
+        return False
+    return True
 
 
 def available_csv_files(raw_dir: Path) -> list[Path]:
@@ -339,6 +355,94 @@ def _build_hist_pipeline(frame: pd.DataFrame, feature_columns: tuple[str, ...], 
     return Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
 
+def _build_xgboost_pipeline(frame: pd.DataFrame, feature_columns: tuple[str, ...], seed: int) -> Pipeline:
+    from xgboost import XGBClassifier
+
+    numeric_cols, categorical_cols = _split_feature_types(frame, feature_columns)
+    transformers: list[tuple[str, Any, list[str]]] = []
+
+    if numeric_cols:
+        transformers.append(("num", Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))]), numeric_cols))
+    if categorical_cols:
+        transformers.append(
+            (
+                "cat",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                categorical_cols,
+            )
+        )
+    if not transformers:
+        raise ValueError("No features available for xgboost model.")
+
+    preprocessor = ColumnTransformer(transformers=transformers, sparse_threshold=1.0)
+    model = XGBClassifier(
+        n_estimators=1200,
+        learning_rate=0.02,
+        max_depth=4,
+        min_child_weight=2,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        reg_lambda=1.2,
+        random_state=seed,
+        n_jobs=-1,
+    )
+    return Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+
+
+def _build_lightgbm_pipeline(frame: pd.DataFrame, feature_columns: tuple[str, ...], seed: int) -> Pipeline:
+    from lightgbm import LGBMClassifier
+
+    numeric_cols, categorical_cols = _split_feature_types(frame, feature_columns)
+    transformers: list[tuple[str, Any, list[str]]] = []
+
+    if numeric_cols:
+        transformers.append(("num", Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))]), numeric_cols))
+    if categorical_cols:
+        transformers.append(
+            (
+                "cat",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        (
+                            "ordinal",
+                            OrdinalEncoder(
+                                handle_unknown="use_encoded_value",
+                                unknown_value=-1,
+                                encoded_missing_value=-1,
+                            ),
+                        ),
+                    ]
+                ),
+                categorical_cols,
+            )
+        )
+    if not transformers:
+        raise ValueError("No features available for lightgbm model.")
+
+    preprocessor = ColumnTransformer(transformers=transformers, sparse_threshold=0.0)
+    model = LGBMClassifier(
+        n_estimators=1400,
+        learning_rate=0.02,
+        num_leaves=31,
+        min_child_samples=20,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        reg_lambda=0.6,
+        verbosity=-1,
+        random_state=seed,
+        n_jobs=-1,
+    )
+    return Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
+
+
 def _prepare_catboost_frame(frame: pd.DataFrame, categorical_cols: list[str]) -> pd.DataFrame:
     out = frame.copy()
     for column in categorical_cols:
@@ -405,6 +509,61 @@ def _metrics_for_classification(y_true: pd.Series, labels: np.ndarray, proba: np
     return acc, ll
 
 
+def _find_best_pairwise_blend(
+    *,
+    y_true: pd.Series,
+    metrics_rows: list[CandidateMetrics],
+    prediction_cache: dict[str, tuple[np.ndarray, np.ndarray | None]],
+) -> tuple[str, np.ndarray, np.ndarray, dict[str, Any]] | None:
+    ranked = sorted(
+        metrics_rows,
+        key=lambda row: (
+            float(row.accuracy),
+            -float(row.log_loss) if row.log_loss is not None and np.isfinite(row.log_loss) else -1e9,
+        ),
+        reverse=True,
+    )
+    probabilistic = [
+        row.name
+        for row in ranked
+        if row.name in prediction_cache
+        and prediction_cache[row.name][1] is not None
+        and np.asarray(prediction_cache[row.name][1]).ndim == 2
+        and np.asarray(prediction_cache[row.name][1]).shape[1] == 2
+    ]
+    if len(probabilistic) < 2:
+        return None
+
+    first, second = probabilistic[0], probabilistic[1]
+    first_proba = np.asarray(prediction_cache[first][1], dtype=np.float64)[:, 1]
+    second_proba = np.asarray(prediction_cache[second][1], dtype=np.float64)[:, 1]
+
+    best: tuple[float, float, float, np.ndarray] | None = None
+    for weight in np.arange(0.05, 1.0, 0.05):
+        mixed = weight * first_proba + (1.0 - weight) * second_proba
+        labels = (mixed >= 0.5).astype(int)
+        proba = np.column_stack([1.0 - mixed, mixed])
+        acc, ll = _metrics_for_classification(y_true, labels, proba)
+        loss_score = -1e9 if not np.isfinite(ll) else -ll
+        score = (acc, loss_score)
+        if best is None or score > (best[0], best[1]):
+            best = (float(acc), float(loss_score), float(weight), mixed)
+
+    if best is None:
+        return None
+
+    _, _, best_weight, mixed = best
+    labels = (mixed >= 0.5).astype(int)
+    proba = np.column_stack([1.0 - mixed, mixed])
+    blend_name = f"blend:{first}+{second}"
+    extras = {
+        "blend_primary_strategy": first,
+        "blend_secondary_strategy": second,
+        "blend_primary_weight": float(best_weight),
+    }
+    return blend_name, labels, proba, extras
+
+
 def fit_and_score_holdout(
     dataset: DatasetBundle,
     holdout_fraction: float = 0.2,
@@ -434,15 +593,35 @@ def fit_and_score_holdout(
         "forest": _build_forest_pipeline(work, dataset.feature_columns, seed=seed),
         "hist": _build_hist_pipeline(work, dataset.feature_columns, seed=seed),
     }
+    if _xgboost_available():
+        try:
+            candidates["xgboost"] = _build_xgboost_pipeline(work, dataset.feature_columns, seed=seed)
+        except Exception:
+            pass
+    if _lightgbm_available():
+        try:
+            candidates["lightgbm"] = _build_lightgbm_pipeline(work, dataset.feature_columns, seed=seed)
+        except Exception:
+            pass
 
     metrics_rows: list[CandidateMetrics] = []
     prediction_cache: dict[str, tuple[np.ndarray, np.ndarray | None]] = {}
     selection_extras: dict[str, Any] = {}
 
     for name, model in candidates.items():
-        model.fit(x_train, y_train)
-        labels = np.asarray(model.predict(x_holdout))
-        proba = np.asarray(model.predict_proba(x_holdout)) if hasattr(model, "predict_proba") else None
+        if name == "lightgbm":
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+                )
+                model.fit(x_train, y_train)
+                labels = np.asarray(model.predict(x_holdout))
+                proba = np.asarray(model.predict_proba(x_holdout)) if hasattr(model, "predict_proba") else None
+        else:
+            model.fit(x_train, y_train)
+            labels = np.asarray(model.predict(x_holdout))
+            proba = np.asarray(model.predict_proba(x_holdout)) if hasattr(model, "predict_proba") else None
         acc, ll = _metrics_for_classification(y_holdout, labels, proba)
         metrics_rows.append(CandidateMetrics(name=name, accuracy=acc, log_loss=ll))
         prediction_cache[name] = (labels, proba)
@@ -463,6 +642,18 @@ def fit_and_score_holdout(
             selection_extras["catboost_best_iteration"] = int(max(0, cat_model.get_best_iteration()))
         except Exception:
             pass
+
+    blend = _find_best_pairwise_blend(
+        y_true=y_holdout,
+        metrics_rows=metrics_rows,
+        prediction_cache=prediction_cache,
+    )
+    if blend is not None:
+        blend_name, labels, proba, extras = blend
+        acc, ll = _metrics_for_classification(y_holdout, labels, proba)
+        metrics_rows.append(CandidateMetrics(name=blend_name, accuracy=acc, log_loss=ll))
+        prediction_cache[blend_name] = (labels, proba)
+        selection_extras.update(extras)
 
     def rank_key(row: CandidateMetrics) -> tuple[float, float]:
         loss_score = -1e9 if row.log_loss is None or not np.isfinite(row.log_loss) else -float(row.log_loss)
@@ -500,8 +691,13 @@ def fit_and_score_holdout(
     return selection, holdout_metrics, holdout_predictions
 
 
-def fit_final_model(dataset: DatasetBundle, selection: dict[str, Any], seed: int = 42) -> dict[str, Any]:
-    strategy = str(selection["selected_strategy"])
+def _fit_strategy_model(
+    *,
+    dataset: DatasetBundle,
+    strategy: str,
+    selection: dict[str, Any],
+    seed: int,
+) -> dict[str, Any]:
     x_train = dataset.train_frame.loc[:, dataset.feature_columns]
     y_train = pd.to_numeric(dataset.train_frame[dataset.target_column], errors="coerce").fillna(0).astype(int)
 
@@ -530,36 +726,74 @@ def fit_final_model(dataset: DatasetBundle, selection: dict[str, Any], seed: int
         )
         model.fit(x_train_cb, y_train, cat_features=categorical_cols, verbose=False)
         return {
-            "competition": COMPETITION_SLUG,
             "selected_strategy": "catboost",
-            "id_column": dataset.id_column,
-            "target_column": dataset.target_column,
             "feature_columns": list(dataset.feature_columns),
             "catboost_categorical_columns": categorical_cols,
             "model": model,
-            "seed": int(seed),
         }
 
     if strategy == "forest":
         model = _build_forest_pipeline(dataset.train_frame, dataset.feature_columns, seed=seed)
     elif strategy == "hist":
         model = _build_hist_pipeline(dataset.train_frame, dataset.feature_columns, seed=seed)
+    elif strategy == "xgboost":
+        if not _xgboost_available():
+            raise RuntimeError("xgboost strategy selected but xgboost is not installed.")
+        model = _build_xgboost_pipeline(dataset.train_frame, dataset.feature_columns, seed=seed)
+    elif strategy == "lightgbm":
+        if not _lightgbm_available():
+            raise RuntimeError("lightgbm strategy selected but lightgbm is not installed.")
+        model = _build_lightgbm_pipeline(dataset.train_frame, dataset.feature_columns, seed=seed)
     else:
         model = _build_linear_pipeline(dataset.train_frame, dataset.feature_columns, seed=seed)
         strategy = "linear"
     model.fit(x_train, y_train)
     return {
-        "competition": COMPETITION_SLUG,
         "selected_strategy": strategy,
-        "id_column": dataset.id_column,
-        "target_column": dataset.target_column,
         "feature_columns": list(dataset.feature_columns),
         "model": model,
-        "seed": int(seed),
     }
 
 
-def generate_submission(model_bundle: dict[str, Any], dataset: DatasetBundle) -> pd.DataFrame:
+def fit_final_model(dataset: DatasetBundle, selection: dict[str, Any], seed: int = 42) -> dict[str, Any]:
+    strategy = str(selection["selected_strategy"])
+    if strategy.startswith("blend:"):
+        primary = str(selection.get("blend_primary_strategy", "catboost"))
+        secondary = str(selection.get("blend_secondary_strategy", "linear"))
+        weight = float(selection.get("blend_primary_weight", 0.5))
+        primary_bundle = _fit_strategy_model(dataset=dataset, strategy=primary, selection=selection, seed=seed)
+        secondary_bundle = _fit_strategy_model(dataset=dataset, strategy=secondary, selection=selection, seed=seed)
+        return {
+            "competition": COMPETITION_SLUG,
+            "selected_strategy": strategy,
+            "id_column": dataset.id_column,
+            "target_column": dataset.target_column,
+            "feature_columns": list(dataset.feature_columns),
+            "blend_primary_strategy": primary,
+            "blend_secondary_strategy": secondary,
+            "blend_primary_weight": weight,
+            "primary_model_bundle": primary_bundle,
+            "secondary_model_bundle": secondary_bundle,
+            "seed": int(seed),
+        }
+
+    trained = _fit_strategy_model(dataset=dataset, strategy=strategy, selection=selection, seed=seed)
+    return {
+        "competition": COMPETITION_SLUG,
+        "selected_strategy": str(trained["selected_strategy"]),
+        "id_column": dataset.id_column,
+        "target_column": dataset.target_column,
+        "feature_columns": list(dataset.feature_columns),
+        "model": trained["model"],
+        "seed": int(seed),
+        **({"catboost_categorical_columns": trained["catboost_categorical_columns"]} if "catboost_categorical_columns" in trained else {}),
+    }
+
+
+def _predict_probabilities(
+    model_bundle: dict[str, Any],
+    dataset: DatasetBundle,
+) -> np.ndarray:
     strategy = str(model_bundle["selected_strategy"])
     model = model_bundle["model"]
     x_test = dataset.test_frame.loc[:, dataset.feature_columns]
@@ -567,9 +801,39 @@ def generate_submission(model_bundle: dict[str, Any], dataset: DatasetBundle) ->
     if strategy == "catboost":
         categorical_cols = list(model_bundle.get("catboost_categorical_columns", []))
         x_test = _prepare_catboost_frame(x_test, categorical_cols)
-        predictions = np.asarray(model.predict(x_test)).reshape(-1)
+        proba = np.asarray(model.predict_proba(x_test))
+    elif hasattr(model, "predict_proba"):
+        if strategy == "lightgbm":
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+                )
+                proba = np.asarray(model.predict_proba(x_test))
+        else:
+            proba = np.asarray(model.predict_proba(x_test))
     else:
-        predictions = np.asarray(model.predict(x_test)).reshape(-1)
+        labels = np.asarray(model.predict(x_test)).astype(int).reshape(-1)
+        proba = np.column_stack([1 - labels, labels])
+
+    if proba.ndim != 2 or proba.shape[1] != 2:
+        raise ValueError("Expected binary-class probabilities with 2 columns.")
+    return proba
+
+
+def generate_submission(model_bundle: dict[str, Any], dataset: DatasetBundle) -> pd.DataFrame:
+    strategy = str(model_bundle["selected_strategy"])
+    if strategy.startswith("blend:"):
+        primary_bundle = dict(model_bundle["primary_model_bundle"])
+        secondary_bundle = dict(model_bundle["secondary_model_bundle"])
+        weight = float(model_bundle.get("blend_primary_weight", 0.5))
+        primary_proba = _predict_probabilities(primary_bundle, dataset)[:, 1]
+        secondary_proba = _predict_probabilities(secondary_bundle, dataset)[:, 1]
+        combined = weight * primary_proba + (1.0 - weight) * secondary_proba
+        predictions = (combined >= 0.5).astype(int)
+    else:
+        proba = _predict_probabilities(model_bundle, dataset)
+        predictions = (proba[:, 1] >= 0.5).astype(int)
 
     prediction_frame = pd.DataFrame(
         {
@@ -595,4 +859,3 @@ def save_model_bundle(model_bundle: dict[str, Any], path: Path = DEFAULT_MODEL_P
 def save_metrics(payload: dict[str, Any], path: Path = DEFAULT_METRICS_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-

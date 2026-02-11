@@ -212,9 +212,10 @@ def test_holdout_and_submission(tmp_path: Path):
     final_model = fit_final_model(dataset=dataset, selection=selection, seed=7)
     submission = generate_submission(final_model, dataset=dataset)
 
-    assert selection["selected_strategy"] in {"linear", "forest", "hist", "catboost"}
+    strategy = str(selection["selected_strategy"])
+    allowed = {"linear", "forest", "hist", "catboost", "xgboost", "lightgbm"}
+    assert strategy in allowed or strategy.startswith("blend:")
     assert "accuracy" in metrics and "log_loss" in metrics
     assert list(submission.columns) == ["PassengerId", "Survived"]
     assert submission["Survived"].isin([0, 1]).all()
     assert list(holdout_predictions.columns)[0] == "PassengerId"
-
