@@ -17,7 +17,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassif
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
 
@@ -443,6 +443,30 @@ def _build_lightgbm_pipeline(frame: pd.DataFrame, feature_columns: tuple[str, ..
     return Pipeline(steps=[("preprocess", preprocessor), ("model", model)])
 
 
+def _build_strategy_model(
+    *,
+    strategy: str,
+    frame: pd.DataFrame,
+    feature_columns: tuple[str, ...],
+    seed: int,
+) -> Any:
+    if strategy == "linear":
+        return _build_linear_pipeline(frame, feature_columns, seed=seed)
+    if strategy == "forest":
+        return _build_forest_pipeline(frame, feature_columns, seed=seed)
+    if strategy == "hist":
+        return _build_hist_pipeline(frame, feature_columns, seed=seed)
+    if strategy == "xgboost":
+        if not _xgboost_available():
+            raise RuntimeError("xgboost is not installed.")
+        return _build_xgboost_pipeline(frame, feature_columns, seed=seed)
+    if strategy == "lightgbm":
+        if not _lightgbm_available():
+            raise RuntimeError("lightgbm is not installed.")
+        return _build_lightgbm_pipeline(frame, feature_columns, seed=seed)
+    raise ValueError(f"Unknown strategy: {strategy}")
+
+
 def _prepare_catboost_frame(frame: pd.DataFrame, categorical_cols: list[str]) -> pd.DataFrame:
     out = frame.copy()
     for column in categorical_cols:
@@ -576,81 +600,112 @@ def fit_and_score_holdout(
     x_all = work.loc[:, dataset.feature_columns]
     y_all = pd.to_numeric(work[dataset.target_column], errors="coerce").fillna(0).astype(int)
 
-    train_idx, holdout_idx = train_test_split(
-        np.arange(len(work), dtype=np.int64),
-        test_size=float(holdout_fraction),
-        random_state=seed,
-        shuffle=True,
-        stratify=y_all,
-    )
-    x_train = x_all.iloc[train_idx]
-    y_train = y_all.iloc[train_idx]
-    x_holdout = x_all.iloc[holdout_idx]
-    y_holdout = y_all.iloc[holdout_idx]
+    class_counts = y_all.value_counts()
+    if class_counts.empty:
+        raise ValueError("No target classes found.")
+    max_splits = int(class_counts.min())
+    n_splits = max(2, min(5, max_splits))
+    folds = list(StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed).split(x_all, y_all))
 
-    candidates: dict[str, Any] = {
-        "linear": _build_linear_pipeline(work, dataset.feature_columns, seed=seed),
-        "forest": _build_forest_pipeline(work, dataset.feature_columns, seed=seed),
-        "hist": _build_hist_pipeline(work, dataset.feature_columns, seed=seed),
-    }
+    candidate_names = ["linear", "forest", "hist"]
     if _xgboost_available():
-        try:
-            candidates["xgboost"] = _build_xgboost_pipeline(work, dataset.feature_columns, seed=seed)
-        except Exception:
-            pass
+        candidate_names.append("xgboost")
     if _lightgbm_available():
-        try:
-            candidates["lightgbm"] = _build_lightgbm_pipeline(work, dataset.feature_columns, seed=seed)
-        except Exception:
-            pass
+        candidate_names.append("lightgbm")
 
     metrics_rows: list[CandidateMetrics] = []
     prediction_cache: dict[str, tuple[np.ndarray, np.ndarray | None]] = {}
     selection_extras: dict[str, Any] = {}
 
-    for name, model in candidates.items():
-        if name == "lightgbm":
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+    for name in candidate_names:
+        try:
+            oof_labels = np.zeros(len(work), dtype=np.int64)
+            oof_proba = np.full((len(work), 2), np.nan, dtype=np.float64)
+            has_binary_proba = True
+            for fold_id, (train_idx, valid_idx) in enumerate(folds):
+                model = _build_strategy_model(
+                    strategy=name,
+                    frame=work,
+                    feature_columns=dataset.feature_columns,
+                    seed=seed + fold_id,
                 )
-                model.fit(x_train, y_train)
-                labels = np.asarray(model.predict(x_holdout))
-                proba = np.asarray(model.predict_proba(x_holdout)) if hasattr(model, "predict_proba") else None
-        else:
-            model.fit(x_train, y_train)
-            labels = np.asarray(model.predict(x_holdout))
-            proba = np.asarray(model.predict_proba(x_holdout)) if hasattr(model, "predict_proba") else None
-        acc, ll = _metrics_for_classification(y_holdout, labels, proba)
-        metrics_rows.append(CandidateMetrics(name=name, accuracy=acc, log_loss=ll))
-        prediction_cache[name] = (labels, proba)
+                x_train = x_all.iloc[train_idx]
+                y_train = y_all.iloc[train_idx]
+                x_valid = x_all.iloc[valid_idx]
+
+                if name == "lightgbm":
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+                        )
+                        model.fit(x_train, y_train)
+                        labels = np.asarray(model.predict(x_valid)).reshape(-1).astype(np.int64)
+                        proba = np.asarray(model.predict_proba(x_valid)) if hasattr(model, "predict_proba") else None
+                else:
+                    model.fit(x_train, y_train)
+                    labels = np.asarray(model.predict(x_valid)).reshape(-1).astype(np.int64)
+                    proba = np.asarray(model.predict_proba(x_valid)) if hasattr(model, "predict_proba") else None
+
+                oof_labels[valid_idx] = labels
+                if proba is None or proba.ndim != 2 or proba.shape[1] != 2:
+                    has_binary_proba = False
+                else:
+                    oof_proba[valid_idx] = proba
+
+            proba_eval = oof_proba if has_binary_proba and np.isfinite(oof_proba).all() else None
+            acc, ll = _metrics_for_classification(y_all, oof_labels, proba_eval)
+            metrics_rows.append(CandidateMetrics(name=name, accuracy=acc, log_loss=ll))
+            prediction_cache[name] = (oof_labels, proba_eval)
+        except Exception:
+            continue
 
     if _catboost_available():
         try:
-            cat_model, labels, proba = _fit_catboost_holdout(
-                x_train=x_train,
-                y_train=y_train,
-                x_holdout=x_holdout,
-                y_holdout=y_holdout,
-                feature_columns=dataset.feature_columns,
-                seed=seed,
-            )
-            acc, ll = _metrics_for_classification(y_holdout, labels, proba)
+            oof_labels = np.zeros(len(work), dtype=np.int64)
+            oof_proba = np.full((len(work), 2), np.nan, dtype=np.float64)
+            best_iterations: list[int] = []
+            for fold_id, (train_idx, valid_idx) in enumerate(folds):
+                x_train = x_all.iloc[train_idx]
+                y_train = y_all.iloc[train_idx]
+                x_valid = x_all.iloc[valid_idx]
+                y_valid = y_all.iloc[valid_idx]
+                cat_model, labels, proba = _fit_catboost_holdout(
+                    x_train=x_train,
+                    y_train=y_train,
+                    x_holdout=x_valid,
+                    y_holdout=y_valid,
+                    feature_columns=dataset.feature_columns,
+                    seed=seed + fold_id,
+                )
+                oof_labels[valid_idx] = labels.reshape(-1).astype(np.int64)
+                oof_proba[valid_idx] = proba
+                try:
+                    best_iteration = int(cat_model.get_best_iteration())
+                    if best_iteration > 0:
+                        best_iterations.append(best_iteration)
+                except Exception:
+                    pass
+
+            acc, ll = _metrics_for_classification(y_all, oof_labels, oof_proba)
             metrics_rows.append(CandidateMetrics(name="catboost", accuracy=acc, log_loss=ll))
-            prediction_cache["catboost"] = (labels, proba)
-            selection_extras["catboost_best_iteration"] = int(max(0, cat_model.get_best_iteration()))
+            prediction_cache["catboost"] = (oof_labels, oof_proba)
+            if best_iterations:
+                selection_extras["catboost_best_iteration"] = int(np.median(np.asarray(best_iterations)))
         except Exception:
             pass
 
+    if not metrics_rows:
+        raise RuntimeError("No candidate models were evaluated successfully.")
+
     blend = _find_best_pairwise_blend(
-        y_true=y_holdout,
+        y_true=y_all,
         metrics_rows=metrics_rows,
         prediction_cache=prediction_cache,
     )
     if blend is not None:
         blend_name, labels, proba, extras = blend
-        acc, ll = _metrics_for_classification(y_holdout, labels, proba)
+        acc, ll = _metrics_for_classification(y_all, labels, proba)
         metrics_rows.append(CandidateMetrics(name=blend_name, accuracy=acc, log_loss=ll))
         prediction_cache[blend_name] = (labels, proba)
         selection_extras.update(extras)
@@ -663,10 +718,12 @@ def fit_and_score_holdout(
     labels, proba = prediction_cache[best.name]
 
     holdout_metrics = {
-        "rows": int(len(y_holdout)),
+        "rows": int(len(y_all)),
         "accuracy": float(best.accuracy),
         "log_loss": float(best.log_loss) if best.log_loss is not None else float("nan"),
         "selected_strategy": best.name,
+        "selection_method": "stratified_kfold_oof",
+        "cv_folds": int(n_splits),
         "strategy_metrics": [asdict(row) for row in metrics_rows],
     }
     selection = {
@@ -675,13 +732,15 @@ def fit_and_score_holdout(
         "target_column": dataset.target_column,
         "feature_columns": list(dataset.feature_columns),
         "seed": int(seed),
+        "selection_method": "stratified_kfold_oof",
+        "cv_folds": int(n_splits),
         **selection_extras,
     }
 
     holdout_predictions = pd.DataFrame(
         {
-            dataset.id_column: work.iloc[holdout_idx][dataset.id_column].tolist(),
-            dataset.target_column: y_holdout.tolist(),
+            dataset.id_column: work[dataset.id_column].tolist(),
+            dataset.target_column: y_all.tolist(),
             "prediction": labels.tolist(),
         }
     )
