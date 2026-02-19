@@ -533,6 +533,105 @@ def _metrics_for_classification(y_true: pd.Series, labels: np.ndarray, proba: np
     return acc, ll
 
 
+def _prepare_overlap_keys(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    if "Name" in out.columns:
+        out["__surname"] = (
+            out["Name"]
+            .astype(str)
+            .str.split(",", n=1)
+            .str[0]
+            .str.strip()
+            .str.lower()
+        )
+    else:
+        out["__surname"] = ""
+    if "Ticket" in out.columns:
+        out["__ticket_norm"] = (
+            out["Ticket"]
+            .astype(str)
+            .str.replace(r"\s+", "", regex=True)
+            .str.upper()
+        )
+    else:
+        out["__ticket_norm"] = ""
+    fare = pd.to_numeric(out.get("Fare", pd.Series(index=out.index, dtype=float)), errors="coerce").fillna(-1.0)
+    out["__fare_round"] = fare.round(0)
+    out["__family_key"] = (
+        out["__surname"]
+        + "_"
+        + out.get("Pclass", pd.Series(index=out.index, dtype=object)).astype(str)
+        + "_"
+        + out["__fare_round"].astype(str)
+    )
+    return out
+
+
+def _build_overlap_rules(train_frame: pd.DataFrame, target_column: str) -> dict[str, dict[str, int]]:
+    frame = _prepare_overlap_keys(train_frame)
+    y = pd.to_numeric(frame[target_column], errors="coerce").fillna(0).astype(int)
+    frame = frame.assign(__target=y.values)
+
+    def summarize(key: str) -> tuple[dict[str, int], dict[str, int]]:
+        grouped = frame.groupby(key)["__target"].agg(["mean", "count"])
+        pure = grouped[(grouped["count"] >= 2) & ((grouped["mean"] == 0.0) | (grouped["mean"] == 1.0))]
+        strong = grouped[(grouped["count"] >= 3) & ((grouped["mean"] <= 0.2) | (grouped["mean"] >= 0.8))]
+        pure_map = pure["mean"].round().astype(int).to_dict()
+        strong_map = strong["mean"].round().astype(int).to_dict()
+        return pure_map, strong_map
+
+    pure_ticket, strong_ticket = summarize("__ticket_norm")
+    pure_family, strong_family = summarize("__family_key")
+    return {
+        "pure_ticket": pure_ticket,
+        "pure_family": pure_family,
+        "strong_ticket": strong_ticket,
+        "strong_family": strong_family,
+    }
+
+
+def _predict_with_overlap_rules(test_frame: pd.DataFrame, rules: dict[str, dict[str, int]]) -> np.ndarray:
+    frame = _prepare_overlap_keys(test_frame)
+    out = np.full(len(frame), -1, dtype=np.int64)
+
+    def fill(mask_values: pd.Series) -> None:
+        nonlocal out
+        values = pd.to_numeric(mask_values, errors="coerce")
+        mask = values.notna().to_numpy() & (out < 0)
+        if mask.any():
+            out[mask] = values.to_numpy(dtype=np.float64)[mask].astype(np.int64)
+
+    fill(frame["__ticket_norm"].map(rules.get("pure_ticket", {})))
+    fill(frame["__family_key"].map(rules.get("pure_family", {})))
+    fill(frame["__ticket_norm"].map(rules.get("strong_ticket", {})))
+    fill(frame["__family_key"].map(rules.get("strong_family", {})))
+    return out
+
+
+def _apply_overlap_overrides(
+    *,
+    train_frame: pd.DataFrame,
+    valid_frame: pd.DataFrame,
+    target_column: str,
+    labels: np.ndarray,
+    proba: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray | None, int]:
+    rules = _build_overlap_rules(train_frame=train_frame, target_column=target_column)
+    forced = _predict_with_overlap_rules(valid_frame, rules)
+    mask = forced >= 0
+    if not mask.any():
+        return labels, proba, 0
+
+    updated_labels = np.asarray(labels).copy()
+    updated_labels[mask] = forced[mask]
+    updated_proba = None if proba is None else np.asarray(proba).copy()
+    if updated_proba is not None and updated_proba.ndim == 2 and updated_proba.shape[1] == 2:
+        forced_float = forced[mask].astype(np.float64)
+        updated_proba[mask, 1] = forced_float
+        updated_proba[mask, 0] = 1.0 - forced_float
+    return updated_labels, updated_proba, int(mask.sum())
+
+
 def _find_best_pairwise_blend(
     *,
     y_true: pd.Series,
@@ -621,7 +720,11 @@ def fit_and_score_holdout(
         try:
             oof_labels = np.zeros(len(work), dtype=np.int64)
             oof_proba = np.full((len(work), 2), np.nan, dtype=np.float64)
+            oof_labels_overlap = np.zeros(len(work), dtype=np.int64)
+            oof_proba_overlap = np.full((len(work), 2), np.nan, dtype=np.float64)
             has_binary_proba = True
+            has_binary_proba_overlap = True
+            overlap_total = 0
             for fold_id, (train_idx, valid_idx) in enumerate(folds):
                 model = _build_strategy_model(
                     strategy=name,
@@ -653,10 +756,35 @@ def fit_and_score_holdout(
                 else:
                     oof_proba[valid_idx] = proba
 
+                labels_overlap, proba_overlap, forced = _apply_overlap_overrides(
+                    train_frame=work.iloc[train_idx],
+                    valid_frame=work.iloc[valid_idx],
+                    target_column=dataset.target_column,
+                    labels=labels,
+                    proba=proba,
+                )
+                overlap_total += int(forced)
+                oof_labels_overlap[valid_idx] = labels_overlap
+                if proba_overlap is None or proba_overlap.ndim != 2 or proba_overlap.shape[1] != 2:
+                    has_binary_proba_overlap = False
+                else:
+                    oof_proba_overlap[valid_idx] = proba_overlap
+
             proba_eval = oof_proba if has_binary_proba and np.isfinite(oof_proba).all() else None
             acc, ll = _metrics_for_classification(y_all, oof_labels, proba_eval)
             metrics_rows.append(CandidateMetrics(name=name, accuracy=acc, log_loss=ll))
             prediction_cache[name] = (oof_labels, proba_eval)
+
+            if overlap_total > 0:
+                proba_overlap_eval = (
+                    oof_proba_overlap
+                    if has_binary_proba_overlap and np.isfinite(oof_proba_overlap).all()
+                    else None
+                )
+                acc_overlap, ll_overlap = _metrics_for_classification(y_all, oof_labels_overlap, proba_overlap_eval)
+                overlap_name = f"{name}+overlap"
+                metrics_rows.append(CandidateMetrics(name=overlap_name, accuracy=acc_overlap, log_loss=ll_overlap))
+                prediction_cache[overlap_name] = (oof_labels_overlap, proba_overlap_eval)
         except Exception:
             continue
 
@@ -664,7 +792,10 @@ def fit_and_score_holdout(
         try:
             oof_labels = np.zeros(len(work), dtype=np.int64)
             oof_proba = np.full((len(work), 2), np.nan, dtype=np.float64)
+            oof_labels_overlap = np.zeros(len(work), dtype=np.int64)
+            oof_proba_overlap = np.full((len(work), 2), np.nan, dtype=np.float64)
             best_iterations: list[int] = []
+            overlap_total = 0
             for fold_id, (train_idx, valid_idx) in enumerate(folds):
                 x_train = x_all.iloc[train_idx]
                 y_train = y_all.iloc[train_idx]
@@ -680,6 +811,18 @@ def fit_and_score_holdout(
                 )
                 oof_labels[valid_idx] = labels.reshape(-1).astype(np.int64)
                 oof_proba[valid_idx] = proba
+
+                labels_overlap, proba_overlap, forced = _apply_overlap_overrides(
+                    train_frame=work.iloc[train_idx],
+                    valid_frame=work.iloc[valid_idx],
+                    target_column=dataset.target_column,
+                    labels=labels.reshape(-1).astype(np.int64),
+                    proba=proba,
+                )
+                overlap_total += int(forced)
+                oof_labels_overlap[valid_idx] = labels_overlap
+                if proba_overlap is not None and proba_overlap.ndim == 2 and proba_overlap.shape[1] == 2:
+                    oof_proba_overlap[valid_idx] = proba_overlap
                 try:
                     best_iteration = int(cat_model.get_best_iteration())
                     if best_iteration > 0:
@@ -690,6 +833,10 @@ def fit_and_score_holdout(
             acc, ll = _metrics_for_classification(y_all, oof_labels, oof_proba)
             metrics_rows.append(CandidateMetrics(name="catboost", accuracy=acc, log_loss=ll))
             prediction_cache["catboost"] = (oof_labels, oof_proba)
+            if overlap_total > 0 and np.isfinite(oof_proba_overlap).all():
+                acc_overlap, ll_overlap = _metrics_for_classification(y_all, oof_labels_overlap, oof_proba_overlap)
+                metrics_rows.append(CandidateMetrics(name="catboost+overlap", accuracy=acc_overlap, log_loss=ll_overlap))
+                prediction_cache["catboost+overlap"] = (oof_labels_overlap, oof_proba_overlap)
             if best_iterations:
                 selection_extras["catboost_best_iteration"] = int(np.median(np.asarray(best_iterations)))
         except Exception:
@@ -697,18 +844,6 @@ def fit_and_score_holdout(
 
     if not metrics_rows:
         raise RuntimeError("No candidate models were evaluated successfully.")
-
-    blend = _find_best_pairwise_blend(
-        y_true=y_all,
-        metrics_rows=metrics_rows,
-        prediction_cache=prediction_cache,
-    )
-    if blend is not None:
-        blend_name, labels, proba, extras = blend
-        acc, ll = _metrics_for_classification(y_all, labels, proba)
-        metrics_rows.append(CandidateMetrics(name=blend_name, accuracy=acc, log_loss=ll))
-        prediction_cache[blend_name] = (labels, proba)
-        selection_extras.update(extras)
 
     def rank_key(row: CandidateMetrics) -> tuple[float, float]:
         loss_score = -1e9 if row.log_loss is None or not np.isfinite(row.log_loss) else -float(row.log_loss)
@@ -816,7 +951,10 @@ def _fit_strategy_model(
 
 def fit_final_model(dataset: DatasetBundle, selection: dict[str, Any], seed: int = 42) -> dict[str, Any]:
     strategy = str(selection["selected_strategy"])
-    if strategy.startswith("blend:"):
+    use_overlap_postprocess = strategy.endswith("+overlap") and not strategy.startswith("blend:")
+    base_strategy = strategy[:-8] if use_overlap_postprocess else strategy
+
+    if base_strategy.startswith("blend:"):
         primary = str(selection.get("blend_primary_strategy", "catboost"))
         secondary = str(selection.get("blend_secondary_strategy", "linear"))
         weight = float(selection.get("blend_primary_weight", 0.5))
@@ -836,15 +974,22 @@ def fit_final_model(dataset: DatasetBundle, selection: dict[str, Any], seed: int
             "seed": int(seed),
         }
 
-    trained = _fit_strategy_model(dataset=dataset, strategy=strategy, selection=selection, seed=seed)
+    trained = _fit_strategy_model(dataset=dataset, strategy=base_strategy, selection=selection, seed=seed)
+    overlap_rules: dict[str, dict[str, int]] | None = None
+    if use_overlap_postprocess:
+        overlap_rules = _build_overlap_rules(
+            train_frame=dataset.train_frame,
+            target_column=dataset.target_column,
+        )
     return {
         "competition": COMPETITION_SLUG,
-        "selected_strategy": str(trained["selected_strategy"]),
+        "selected_strategy": strategy,
         "id_column": dataset.id_column,
         "target_column": dataset.target_column,
         "feature_columns": list(dataset.feature_columns),
         "model": trained["model"],
         "seed": int(seed),
+        **({"overlap_rules": overlap_rules} if overlap_rules is not None else {}),
         **({"catboost_categorical_columns": trained["catboost_categorical_columns"]} if "catboost_categorical_columns" in trained else {}),
     }
 
@@ -893,6 +1038,14 @@ def generate_submission(model_bundle: dict[str, Any], dataset: DatasetBundle) ->
     else:
         proba = _predict_probabilities(model_bundle, dataset)
         predictions = (proba[:, 1] >= 0.5).astype(int)
+
+    overlap_rules = model_bundle.get("overlap_rules")
+    if isinstance(overlap_rules, dict):
+        forced = _predict_with_overlap_rules(dataset.test_frame, overlap_rules)
+        mask = forced >= 0
+        if mask.any():
+            predictions = np.asarray(predictions).copy()
+            predictions[mask] = forced[mask]
 
     prediction_frame = pd.DataFrame(
         {
