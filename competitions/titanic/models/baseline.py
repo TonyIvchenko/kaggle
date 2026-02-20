@@ -981,6 +981,7 @@ def fit_final_model(dataset: DatasetBundle, selection: dict[str, Any], seed: int
             train_frame=dataset.train_frame,
             target_column=dataset.target_column,
         )
+    decision_threshold = float(selection.get("decision_threshold", 0.5))
     return {
         "competition": COMPETITION_SLUG,
         "selected_strategy": strategy,
@@ -989,6 +990,7 @@ def fit_final_model(dataset: DatasetBundle, selection: dict[str, Any], seed: int
         "feature_columns": list(dataset.feature_columns),
         "model": trained["model"],
         "seed": int(seed),
+        "decision_threshold": decision_threshold,
         **({"overlap_rules": overlap_rules} if overlap_rules is not None else {}),
         **({"catboost_categorical_columns": trained["catboost_categorical_columns"]} if "catboost_categorical_columns" in trained else {}),
     }
@@ -1027,6 +1029,7 @@ def _predict_probabilities(
 
 def generate_submission(model_bundle: dict[str, Any], dataset: DatasetBundle) -> pd.DataFrame:
     strategy = str(model_bundle["selected_strategy"])
+    threshold = float(model_bundle.get("decision_threshold", 0.5))
     if strategy.startswith("blend:"):
         primary_bundle = dict(model_bundle["primary_model_bundle"])
         secondary_bundle = dict(model_bundle["secondary_model_bundle"])
@@ -1034,10 +1037,10 @@ def generate_submission(model_bundle: dict[str, Any], dataset: DatasetBundle) ->
         primary_proba = _predict_probabilities(primary_bundle, dataset)[:, 1]
         secondary_proba = _predict_probabilities(secondary_bundle, dataset)[:, 1]
         combined = weight * primary_proba + (1.0 - weight) * secondary_proba
-        predictions = (combined >= 0.5).astype(int)
+        predictions = (combined >= threshold).astype(int)
     else:
         proba = _predict_probabilities(model_bundle, dataset)
-        predictions = (proba[:, 1] >= 0.5).astype(int)
+        predictions = (proba[:, 1] >= threshold).astype(int)
 
     overlap_rules = model_bundle.get("overlap_rules")
     if isinstance(overlap_rules, dict):
