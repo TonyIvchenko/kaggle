@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -762,9 +763,34 @@ def _candidate_to_dict(config: TorchCandidateConfig) -> dict[str, Any]:
     }
 
 
-def _select_top_candidates(results: list[dict[str, Any]], top_k: int = 3) -> list[dict[str, Any]]:
+def _select_top_candidates(
+    results: list[dict[str, Any]],
+    y_true: np.ndarray | None = None,
+    max_models: int = 3,
+) -> list[dict[str, Any]]:
+    if not results:
+        raise ValueError("No candidate training results are available.")
+
     ordered = sorted(results, key=lambda r: (r["val_metrics"]["mse"], r["val_metrics"]["log_loss"]))
-    return ordered[: max(1, min(top_k, len(ordered)))]
+    model_count = max(1, min(max_models, len(ordered)))
+    if y_true is None or len(ordered) == 1:
+        return ordered[:model_count]
+
+    pool = ordered[: min(len(ordered), 8)]
+    best_combo: tuple[float, float, tuple[dict[str, Any], ...]] | None = None
+    for size in range(1, model_count + 1):
+        for combo in itertools.combinations(pool, size):
+            blended = np.mean(np.stack([entry["val_predictions"] for entry in combo], axis=0), axis=0)
+            blended = np.clip(blended, 0.025, 0.975)
+            mse = float(mean_squared_error(y_true, blended))
+            ll = float(log_loss(y_true, np.clip(blended, 1e-5, 1.0 - 1e-5), labels=[0, 1]))
+            score = (mse, ll, combo)
+            if best_combo is None or score[:2] < best_combo[:2]:
+                best_combo = score
+
+    if best_combo is None:
+        return ordered[:model_count]
+    return list(best_combo[2])
 
 
 def _bundle_predictions(
@@ -791,6 +817,28 @@ def _bundle_predictions(
 
 
 def predict_ensemble(model_bundle: dict[str, Any], feature_frame: pd.DataFrame, device_preference: str = "auto") -> np.ndarray:
+    if model_bundle.get("split_by_gender") and "models_by_gender" in model_bundle:
+        gender_values = feature_frame["gender"].astype(str).to_numpy()
+        predictions = np.zeros(len(feature_frame), dtype=np.float32)
+        covered = np.zeros(len(feature_frame), dtype=bool)
+
+        for gender, gender_bundle in model_bundle["models_by_gender"].items():
+            mask = gender_values == str(gender)
+            if not mask.any():
+                continue
+            covered |= mask
+            gender_frame = feature_frame.loc[mask].reset_index(drop=True)
+            predictions[mask] = predict_ensemble(
+                gender_bundle,
+                gender_frame,
+                device_preference=device_preference,
+            )
+
+        if not covered.all():
+            missing_genders = sorted(pd.unique(gender_values[~covered]).tolist())
+            raise ValueError(f"No gender-specific model is available for genders: {missing_genders}")
+        return np.clip(predictions, 0.025, 0.975)
+
     columns = model_bundle["feature_columns"]
     fill_values = pd.Series(model_bundle["fill_values"])
     x_data = _feature_array(feature_frame, columns, fill_values)
@@ -863,7 +911,7 @@ def fit_and_score_holdout(
         for config in configs
     ]
 
-    selected = _select_top_candidates(results)
+    selected = _select_top_candidates(results, y_true=holdout_y)
     model_entries = [
         {
             "config": _candidate_to_dict(result["config"]),
@@ -957,6 +1005,98 @@ def fit_final_model(
         "target_season": int(target_season),
         "selected_model_names": [entry["config"]["name"] for entry in model_entries],
         "device_used": str(device),
+    }
+
+
+def fit_and_score_holdout_by_gender(
+    training_frame: pd.DataFrame,
+    target_season: int,
+    holdout_season: int | None = None,
+    device_preference: str = "auto",
+    seed: int = 42,
+    candidate_configs: list[TorchCandidateConfig] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], pd.DataFrame]:
+    holdout = holdout_season or default_holdout_season(training_frame, target_season)
+    gender_bundles: dict[str, dict[str, Any]] = {}
+    gender_metrics: dict[str, dict[str, Any]] = {}
+    scored_parts: list[pd.DataFrame] = []
+
+    for gender in sorted(str(value) for value in training_frame["gender"].unique()):
+        subset = training_frame[training_frame["gender"] == gender].reset_index(drop=True)
+        if subset.empty:
+            continue
+        bundle, metrics, scored = fit_and_score_holdout(
+            training_frame=subset,
+            target_season=target_season,
+            holdout_season=holdout,
+            device_preference=device_preference,
+            seed=seed,
+            candidate_configs=candidate_configs,
+        )
+        gender_bundles[gender] = bundle
+        gender_metrics[gender] = metrics
+        scored_parts.append(scored)
+
+    if not scored_parts:
+        raise ValueError("No gender-specific training data is available for holdout evaluation.")
+
+    scored_holdout = pd.concat(scored_parts, ignore_index=True)
+    metrics = evaluate_predictions(scored_holdout, scored_holdout["prediction"].to_numpy(dtype=np.float32))
+    metrics["candidate_metrics_by_gender"] = {
+        gender: gender_metrics[gender]["candidate_metrics"] for gender in sorted(gender_metrics)
+    }
+    metrics["selected_models"] = {
+        gender: gender_bundles[gender]["selected_model_names"] for gender in sorted(gender_bundles)
+    }
+
+    model_bundle = {
+        "framework": "pytorch",
+        "split_by_gender": True,
+        "models_by_gender": gender_bundles,
+        "selected_model_names_by_gender": metrics["selected_models"],
+        "holdout_season": int(holdout),
+        "device_used": str(resolve_device(device_preference)),
+    }
+    return model_bundle, metrics, scored_holdout
+
+
+def fit_final_model_by_gender(
+    training_frame: pd.DataFrame,
+    target_season: int,
+    device_preference: str = "auto",
+    seed: int = 42,
+    selected_configs_by_gender: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    gender_bundles: dict[str, dict[str, Any]] = {}
+    for gender in sorted(str(value) for value in training_frame["gender"].unique()):
+        subset = training_frame[training_frame["gender"] == gender].reset_index(drop=True)
+        if subset.empty:
+            continue
+        selected_configs = None
+        if selected_configs_by_gender is not None:
+            selected_configs = selected_configs_by_gender.get(gender)
+        gender_bundles[gender] = fit_final_model(
+            training_frame=subset,
+            target_season=target_season,
+            device_preference=device_preference,
+            seed=seed,
+            selected_configs=selected_configs,
+        )
+
+    if not gender_bundles:
+        raise ValueError("No gender-specific training data is available for final model training.")
+
+    train_seasons = sorted(int(season) for season in training_frame["season"].unique() if int(season) < target_season)
+    return {
+        "framework": "pytorch",
+        "split_by_gender": True,
+        "models_by_gender": gender_bundles,
+        "target_season": int(target_season),
+        "train_seasons": train_seasons,
+        "selected_model_names_by_gender": {
+            gender: bundle["selected_model_names"] for gender, bundle in sorted(gender_bundles.items())
+        },
+        "device_used": str(resolve_device(device_preference)),
     }
 
 

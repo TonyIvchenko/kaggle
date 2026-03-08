@@ -15,7 +15,9 @@ from competitions.march_machine_learning_mania_2026.models.baseline import (
     evaluate_predictions,
     feature_columns,
     fit_and_score_holdout,
+    fit_and_score_holdout_by_gender,
     fit_final_model,
+    fit_final_model_by_gender,
     generate_submission,
     load_compact_results,
     load_seeds,
@@ -223,5 +225,65 @@ def test_holdout_training_and_submission_generation(tmp_path: Path):
     assert 0.0 <= metrics["mse"] <= 1.0
     assert metrics["candidate_metrics"]
     assert final_model["device_used"] == "cpu"
+    assert list(submission.columns) == ["ID", "Pred"]
+    assert submission["Pred"].between(0.025, 0.975).all()
+
+
+def test_gender_split_training_and_submission_generation(tmp_path: Path):
+    raw_dir = _prepare_competition_dir(tmp_path)
+    files = discover_competition_files(raw_dir)
+    training_frame, submission_frame, _ = build_datasets(files)
+    candidates = [
+        TorchCandidateConfig(
+            name="test_linear",
+            architecture="linear",
+            hidden_dims=(),
+            dropout=0.0,
+            learning_rate=0.01,
+            weight_decay=1e-4,
+            batch_size=32,
+            epochs=20,
+            patience=5,
+            label_smoothing=0.0,
+        ),
+        TorchCandidateConfig(
+            name="test_mlp",
+            architecture="mlp",
+            hidden_dims=(32, 16),
+            dropout=0.1,
+            learning_rate=0.005,
+            weight_decay=5e-4,
+            batch_size=32,
+            epochs=25,
+            patience=6,
+            label_smoothing=0.01,
+        ),
+    ]
+
+    holdout_bundle, metrics, _ = fit_and_score_holdout_by_gender(
+        training_frame=training_frame,
+        target_season=2026,
+        holdout_season=2025,
+        device_preference="cpu",
+        seed=123,
+        candidate_configs=candidates,
+    )
+    final_model = fit_final_model_by_gender(
+        training_frame=training_frame,
+        target_season=2026,
+        device_preference="cpu",
+        seed=123,
+        selected_configs_by_gender={
+            "M": [candidate.__dict__.copy() for candidate in candidates],
+            "W": [candidate.__dict__.copy() for candidate in candidates],
+        },
+    )
+    submission = generate_submission(final_model, submission_frame, device_preference="cpu")
+
+    assert holdout_bundle["split_by_gender"] is True
+    assert {"M", "W"} == set(holdout_bundle["models_by_gender"].keys())
+    assert 0.0 <= metrics["mse"] <= 1.0
+    assert {"M", "W"} == set(metrics["candidate_metrics_by_gender"].keys())
+    assert final_model["split_by_gender"] is True
     assert list(submission.columns) == ["ID", "Pred"]
     assert submission["Pred"].between(0.025, 0.975).all()

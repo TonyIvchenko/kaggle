@@ -21,7 +21,9 @@ from competitions.march_machine_learning_mania_2026.models.baseline import (
     default_holdout_season,
     discover_competition_files,
     fit_and_score_holdout,
+    fit_and_score_holdout_by_gender,
     fit_final_model,
+    fit_final_model_by_gender,
     generate_submission,
     save_metrics,
     save_model_bundle,
@@ -64,6 +66,12 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "mps", "cpu"],
         help="Torch device to use for training and inference.",
     )
+    parser.add_argument(
+        "--split-by-gender",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Train separate men/women ensembles and merge predictions.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed used for torch training.")
     return parser.parse_args()
 
@@ -84,22 +92,44 @@ def main() -> None:
     team_stats.to_csv(team_stats_path, index=False)
 
     holdout_season = args.holdout_season or default_holdout_season(training_frame, args.target_season)
-    holdout_bundle, holdout_metrics, holdout_predictions = fit_and_score_holdout(
-        training_frame=training_frame,
-        target_season=args.target_season,
-        holdout_season=holdout_season,
-        device_preference=args.device_preference,
-        seed=args.seed,
-    )
+    if args.split_by_gender:
+        holdout_bundle, holdout_metrics, holdout_predictions = fit_and_score_holdout_by_gender(
+            training_frame=training_frame,
+            target_season=args.target_season,
+            holdout_season=holdout_season,
+            device_preference=args.device_preference,
+            seed=args.seed,
+        )
+    else:
+        holdout_bundle, holdout_metrics, holdout_predictions = fit_and_score_holdout(
+            training_frame=training_frame,
+            target_season=args.target_season,
+            holdout_season=holdout_season,
+            device_preference=args.device_preference,
+            seed=args.seed,
+        )
     holdout_predictions.to_csv(holdout_predictions_path, index=False)
 
-    final_model = fit_final_model(
-        training_frame,
-        target_season=args.target_season,
-        device_preference=args.device_preference,
-        seed=args.seed,
-        selected_configs=[entry["config"] for entry in holdout_bundle["models"]],
-    )
+    if args.split_by_gender:
+        selected_configs_by_gender = {
+            gender: [entry["config"] for entry in bundle["models"]]
+            for gender, bundle in holdout_bundle["models_by_gender"].items()
+        }
+        final_model = fit_final_model_by_gender(
+            training_frame,
+            target_season=args.target_season,
+            device_preference=args.device_preference,
+            seed=args.seed,
+            selected_configs_by_gender=selected_configs_by_gender,
+        )
+    else:
+        final_model = fit_final_model(
+            training_frame,
+            target_season=args.target_season,
+            device_preference=args.device_preference,
+            seed=args.seed,
+            selected_configs=[entry["config"] for entry in holdout_bundle["models"]],
+        )
     final_model["holdout_metrics"] = holdout_metrics
     final_model["holdout_season"] = holdout_season
     save_model_bundle(final_model, args.model_path)
@@ -117,7 +147,8 @@ def main() -> None:
         "holdout_metrics": holdout_metrics,
         "train_seasons": final_model["train_seasons"],
         "device_used": final_model["device_used"],
-        "selected_models": final_model["selected_model_names"],
+        "selected_models": final_model.get("selected_model_names_by_gender", final_model.get("selected_model_names")),
+        "split_by_gender": bool(args.split_by_gender),
     }
     save_metrics(metrics_payload, args.metrics_path)
 
@@ -134,13 +165,24 @@ def main() -> None:
         f"log_loss={holdout_metrics['log_loss']:.6f}, "
         f"accuracy={holdout_metrics['accuracy']:.4f}"
     )
-    print("Candidate holdout metrics:")
-    for row in holdout_metrics["candidate_metrics"]:
-        print(
-            f"  - {row['name']} ({row['architecture']}): "
-            f"MSE={row['mse']:.6f}, log_loss={row['log_loss']:.6f}, "
-            f"accuracy={row['accuracy']:.4f}, best_epoch={row['best_epoch']}"
-        )
+    if "candidate_metrics_by_gender" in holdout_metrics:
+        print("Candidate holdout metrics:")
+        for gender, rows in sorted(holdout_metrics["candidate_metrics_by_gender"].items()):
+            print(f"  [{gender}]")
+            for row in rows:
+                print(
+                    f"    - {row['name']} ({row['architecture']}): "
+                    f"MSE={row['mse']:.6f}, log_loss={row['log_loss']:.6f}, "
+                    f"accuracy={row['accuracy']:.4f}, best_epoch={row['best_epoch']}"
+                )
+    else:
+        print("Candidate holdout metrics:")
+        for row in holdout_metrics["candidate_metrics"]:
+            print(
+                f"  - {row['name']} ({row['architecture']}): "
+                f"MSE={row['mse']:.6f}, log_loss={row['log_loss']:.6f}, "
+                f"accuracy={row['accuracy']:.4f}, best_epoch={row['best_epoch']}"
+            )
 
 
 if __name__ == "__main__":
