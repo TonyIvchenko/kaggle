@@ -8,21 +8,19 @@ from pathlib import Path
 import re
 from typing import Any
 
-import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss, mean_squared_error
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+import torch
+from torch import Tensor, nn
+from torch.utils.data import DataLoader, TensorDataset
 
 
 COMPETITION_SLUG = "march-machine-learning-mania-2026"
 COMPETITION_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RAW_DIR = COMPETITION_ROOT / "data" / "raw"
 DEFAULT_PROCESSED_DIR = COMPETITION_ROOT / "data" / "processed"
-DEFAULT_MODEL_PATH = COMPETITION_ROOT / "models" / "march_machine_learning_mania_2026.joblib"
+DEFAULT_MODEL_PATH = COMPETITION_ROOT / "models" / "march_machine_learning_mania_2026.pt"
 DEFAULT_METRICS_PATH = COMPETITION_ROOT / "models" / "march_machine_learning_mania_2026_metrics.json"
 DEFAULT_SUBMISSION_PATH = COMPETITION_ROOT / "submissions" / "submission.csv"
 
@@ -469,54 +467,338 @@ def default_holdout_season(training_frame: pd.DataFrame, target_season: int) -> 
     return valid_seasons[-1]
 
 
-def fit_ensemble(training_frame: pd.DataFrame) -> dict[str, Any]:
-    columns = feature_columns()
-    fill_values = training_frame[columns].median(numeric_only=True)
-    x_train = training_frame[columns].fillna(fill_values)
-    y_train = training_frame["label"].astype(int)
+@dataclass(frozen=True)
+class TorchCandidateConfig:
+    name: str
+    architecture: str
+    hidden_dims: tuple[int, ...]
+    dropout: float
+    learning_rate: float
+    weight_decay: float
+    batch_size: int
+    epochs: int
+    patience: int
+    label_smoothing: float = 0.0
 
-    logistic_model = Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            (
-                "model",
-                LogisticRegression(
-                    C=0.15,
-                    max_iter=4000,
-                    solver="lbfgs",
-                    random_state=42,
-                ),
-            ),
-        ]
-    )
-    boosting_model = HistGradientBoostingClassifier(
-        learning_rate=0.05,
-        max_depth=3,
-        max_iter=300,
-        min_samples_leaf=20,
-        random_state=42,
-    )
 
-    logistic_model.fit(x_train, y_train)
-    boosting_model.fit(x_train, y_train)
+class ResidualBlock(nn.Module):
+    def __init__(self, width: int, dropout: float) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(width)
+        self.fc1 = nn.Linear(width, width)
+        self.fc2 = nn.Linear(width, width)
+        self.activation = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
 
+    def forward(self, x: Tensor) -> Tensor:
+        residual = x
+        x = self.norm(x)
+        x = self.fc1(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        return residual + x
+
+
+class MatchupNet(nn.Module):
+    def __init__(self, input_dim: int, config: TorchCandidateConfig) -> None:
+        super().__init__()
+        self.architecture = config.architecture
+
+        if config.architecture == "linear":
+            self.encoder = nn.Identity()
+            self.residual_stack = nn.Identity()
+            self.head = nn.Linear(input_dim, 1)
+            return
+
+        if not config.hidden_dims:
+            raise ValueError(f"Architecture {config.architecture} requires hidden_dims.")
+
+        layers: list[nn.Module] = []
+        current_dim = input_dim
+        for width in config.hidden_dims:
+            layers.extend(
+                [
+                    nn.Linear(current_dim, width),
+                    nn.LayerNorm(width),
+                    nn.GELU(),
+                    nn.Dropout(config.dropout),
+                ]
+            )
+            current_dim = width
+        self.encoder = nn.Sequential(*layers)
+
+        if config.architecture == "residual":
+            self.residual_stack = nn.Sequential(*[ResidualBlock(current_dim, config.dropout) for _ in range(2)])
+        else:
+            self.residual_stack = nn.Identity()
+
+        self.head = nn.Linear(current_dim, 1)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.encoder(x)
+        x = self.residual_stack(x)
+        return self.head(x)
+
+
+def default_torch_candidates() -> list[TorchCandidateConfig]:
+    return [
+        TorchCandidateConfig(
+            name="linear_l2",
+            architecture="linear",
+            hidden_dims=(),
+            dropout=0.0,
+            learning_rate=3e-3,
+            weight_decay=5e-4,
+            batch_size=256,
+            epochs=260,
+            patience=35,
+            label_smoothing=0.01,
+        ),
+        TorchCandidateConfig(
+            name="mlp_wider",
+            architecture="mlp",
+            hidden_dims=(320, 160, 64),
+            dropout=0.25,
+            learning_rate=9e-4,
+            weight_decay=1.5e-3,
+            batch_size=256,
+            epochs=340,
+            patience=45,
+            label_smoothing=0.02,
+        ),
+        TorchCandidateConfig(
+            name="mlp_deep",
+            architecture="mlp",
+            hidden_dims=(256, 128, 128, 64),
+            dropout=0.30,
+            learning_rate=9e-4,
+            weight_decay=2e-3,
+            batch_size=256,
+            epochs=340,
+            patience=45,
+            label_smoothing=0.03,
+        ),
+        TorchCandidateConfig(
+            name="residual_wide",
+            architecture="residual",
+            hidden_dims=(256, 256),
+            dropout=0.25,
+            learning_rate=9e-4,
+            weight_decay=1.2e-3,
+            batch_size=256,
+            epochs=380,
+            patience=55,
+            label_smoothing=0.02,
+        ),
+        TorchCandidateConfig(
+            name="residual",
+            architecture="residual",
+            hidden_dims=(192, 192),
+            dropout=0.20,
+            learning_rate=1.1e-3,
+            weight_decay=1e-3,
+            batch_size=256,
+            epochs=360,
+            patience=50,
+            label_smoothing=0.02,
+        ),
+    ]
+
+
+def resolve_device(preferred: str = "auto") -> torch.device:
+    pref = preferred.lower()
+    if pref == "auto":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    if pref == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("MPS device requested but not available on this machine.")
+        return torch.device("mps")
+    if pref == "cpu":
+        return torch.device("cpu")
+    raise ValueError(f"Unsupported device preference: {preferred}")
+
+
+def _feature_fill_values(training_frame: pd.DataFrame, columns: list[str]) -> pd.Series:
+    return training_frame[columns].median(numeric_only=True)
+
+
+def _feature_array(frame: pd.DataFrame, columns: list[str], fill_values: pd.Series) -> np.ndarray:
+    return frame[columns].fillna(fill_values).to_numpy(dtype=np.float32, copy=True)
+
+
+def _norm_stats(x_train: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    mean = x_train.mean(axis=0)
+    std = x_train.std(axis=0)
+    std = np.where(std < 1e-6, 1.0, std)
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
+def _to_tensor(x: np.ndarray, device: torch.device) -> Tensor:
+    return torch.tensor(x, dtype=torch.float32, device=device)
+
+
+def _evaluate_probs(y_true: np.ndarray, probs: np.ndarray) -> dict[str, float]:
+    clipped = np.clip(probs, 1e-5, 1 - 1e-5)
     return {
-        "feature_columns": columns,
-        "fill_values": fill_values.to_dict(),
-        "logistic_model": logistic_model,
-        "boosting_model": boosting_model,
+        "mse": float(mean_squared_error(y_true, probs)),
+        "log_loss": float(log_loss(y_true, clipped, labels=[0, 1])),
+        "accuracy": float(accuracy_score(y_true, probs >= 0.5)),
     }
 
 
-def predict_ensemble(model_bundle: dict[str, Any], feature_frame: pd.DataFrame) -> np.ndarray:
+def _train_torch_candidate(
+    train_x: np.ndarray,
+    train_y: np.ndarray,
+    val_x: np.ndarray,
+    val_y: np.ndarray,
+    config: TorchCandidateConfig,
+    device: torch.device,
+    seed: int,
+    norm_mean: np.ndarray,
+    norm_std: np.ndarray,
+) -> dict[str, Any]:
+    torch.manual_seed(seed)
+    if device.type == "mps":
+        torch.mps.manual_seed(seed)
+
+    train_x_norm = ((train_x - norm_mean) / norm_std).astype(np.float32)
+    val_x_norm = ((val_x - norm_mean) / norm_std).astype(np.float32)
+
+    train_features = torch.tensor(train_x_norm, dtype=torch.float32)
+    train_targets = torch.tensor(train_y.reshape(-1, 1), dtype=torch.float32)
+    loader = DataLoader(TensorDataset(train_features, train_targets), batch_size=config.batch_size, shuffle=True)
+
+    model = MatchupNet(input_dim=train_x.shape[1], config=config).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+
+    pos_count = max(float(train_y.sum()), 1.0)
+    neg_count = max(float((1.0 - train_y).sum()), 1.0)
+    pos_weight = torch.tensor([neg_count / pos_count], dtype=torch.float32, device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    val_tensor = _to_tensor(val_x_norm, device=device)
+    val_targets = val_y.astype(np.float32)
+
+    best_mse = float("inf")
+    best_state: dict[str, Tensor] | None = None
+    best_probs: np.ndarray | None = None
+    best_epoch = 0
+    stale_epochs = 0
+
+    for epoch in range(1, config.epochs + 1):
+        model.train()
+        for batch_x, batch_y in loader:
+            optimizer.zero_grad()
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
+            smooth = config.label_smoothing
+            if smooth > 0:
+                batch_y = batch_y * (1.0 - 2.0 * smooth) + smooth
+            logits = model(batch_x)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.5)
+            optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            probs = torch.sigmoid(model(val_tensor)).detach().cpu().numpy().reshape(-1)
+        mse = float(mean_squared_error(val_targets, probs))
+        if mse < best_mse - 1e-6:
+            best_mse = mse
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_probs = probs
+            best_epoch = epoch
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+            if stale_epochs >= config.patience:
+                break
+
+    if best_state is None or best_probs is None:
+        raise RuntimeError(f"Training failed for candidate {config.name}.")
+
+    metrics = _evaluate_probs(val_targets, best_probs)
+    return {
+        "config": config,
+        "state_dict": best_state,
+        "val_predictions": best_probs.astype(np.float32),
+        "val_metrics": metrics,
+        "best_epoch": best_epoch,
+    }
+
+
+def _candidate_config_from_dict(raw: dict[str, Any]) -> TorchCandidateConfig:
+    return TorchCandidateConfig(
+        name=str(raw["name"]),
+        architecture=str(raw["architecture"]),
+        hidden_dims=tuple(int(x) for x in raw["hidden_dims"]),
+        dropout=float(raw["dropout"]),
+        learning_rate=float(raw["learning_rate"]),
+        weight_decay=float(raw["weight_decay"]),
+        batch_size=int(raw["batch_size"]),
+        epochs=int(raw["epochs"]),
+        patience=int(raw["patience"]),
+        label_smoothing=float(raw.get("label_smoothing", 0.0)),
+    )
+
+
+def _candidate_to_dict(config: TorchCandidateConfig) -> dict[str, Any]:
+    return {
+        "name": config.name,
+        "architecture": config.architecture,
+        "hidden_dims": list(config.hidden_dims),
+        "dropout": config.dropout,
+        "learning_rate": config.learning_rate,
+        "weight_decay": config.weight_decay,
+        "batch_size": config.batch_size,
+        "epochs": config.epochs,
+        "patience": config.patience,
+        "label_smoothing": config.label_smoothing,
+    }
+
+
+def _select_top_candidates(results: list[dict[str, Any]], top_k: int = 3) -> list[dict[str, Any]]:
+    ordered = sorted(results, key=lambda r: (r["val_metrics"]["mse"], r["val_metrics"]["log_loss"]))
+    return ordered[: max(1, min(top_k, len(ordered)))]
+
+
+def _bundle_predictions(
+    model_entries: list[dict[str, Any]],
+    x_data: np.ndarray,
+    norm_mean: np.ndarray,
+    norm_std: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    x_norm = ((x_data - norm_mean) / norm_std).astype(np.float32)
+    x_tensor = _to_tensor(x_norm, device=device)
+
+    probs: list[np.ndarray] = []
+    for entry in model_entries:
+        config = _candidate_config_from_dict(entry["config"])
+        model = MatchupNet(input_dim=x_data.shape[1], config=config).to(device)
+        model.load_state_dict(entry["state_dict"])
+        model.eval()
+        with torch.no_grad():
+            p = torch.sigmoid(model(x_tensor)).detach().cpu().numpy().reshape(-1)
+        probs.append(p)
+    blended = np.mean(np.stack(probs, axis=0), axis=0)
+    return np.clip(blended, 0.025, 0.975)
+
+
+def predict_ensemble(model_bundle: dict[str, Any], feature_frame: pd.DataFrame, device_preference: str = "auto") -> np.ndarray:
     columns = model_bundle["feature_columns"]
     fill_values = pd.Series(model_bundle["fill_values"])
-    x_frame = feature_frame[columns].fillna(fill_values)
+    x_data = _feature_array(feature_frame, columns, fill_values)
 
-    logistic_probs = model_bundle["logistic_model"].predict_proba(x_frame)[:, 1]
-    boosting_probs = model_bundle["boosting_model"].predict_proba(x_frame)[:, 1]
-    ensemble_probs = 0.5 * logistic_probs + 0.5 * boosting_probs
-    return np.clip(ensemble_probs, 0.025, 0.975)
+    norm_mean = np.asarray(model_bundle["norm_mean"], dtype=np.float32)
+    norm_std = np.asarray(model_bundle["norm_std"], dtype=np.float32)
+    device = resolve_device(device_preference)
+    return _bundle_predictions(model_bundle["models"], x_data, norm_mean, norm_std, device)
 
 
 def evaluate_predictions(feature_frame: pd.DataFrame, predictions: np.ndarray) -> dict[str, Any]:
@@ -546,6 +828,9 @@ def fit_and_score_holdout(
     training_frame: pd.DataFrame,
     target_season: int,
     holdout_season: int | None = None,
+    device_preference: str = "auto",
+    seed: int = 42,
+    candidate_configs: list[TorchCandidateConfig] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], pd.DataFrame]:
     holdout = holdout_season or default_holdout_season(training_frame, target_season)
     train_rows = training_frame[training_frame["season"] < holdout].reset_index(drop=True)
@@ -553,32 +838,138 @@ def fit_and_score_holdout(
     if train_rows.empty or holdout_rows.empty:
         raise ValueError(f"Holdout season {holdout} does not produce a usable train/eval split.")
 
-    model_bundle = fit_ensemble(train_rows)
-    holdout_predictions = predict_ensemble(model_bundle, holdout_rows)
+    columns = feature_columns()
+    fill_values = _feature_fill_values(train_rows, columns)
+    train_x = _feature_array(train_rows, columns, fill_values)
+    holdout_x = _feature_array(holdout_rows, columns, fill_values)
+    train_y = train_rows["label"].to_numpy(dtype=np.float32)
+    holdout_y = holdout_rows["label"].to_numpy(dtype=np.float32)
+
+    norm_mean, norm_std = _norm_stats(train_x)
+    device = resolve_device(device_preference)
+    configs = candidate_configs or default_torch_candidates()
+    results = [
+        _train_torch_candidate(
+            train_x=train_x,
+            train_y=train_y,
+            val_x=holdout_x,
+            val_y=holdout_y,
+            config=config,
+            device=device,
+            seed=seed,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+        )
+        for config in configs
+    ]
+
+    selected = _select_top_candidates(results)
+    model_entries = [
+        {
+            "config": _candidate_to_dict(result["config"]),
+            "state_dict": result["state_dict"],
+            "best_epoch": result["best_epoch"],
+        }
+        for result in selected
+    ]
+    holdout_predictions = _bundle_predictions(model_entries, holdout_x, norm_mean, norm_std, device)
+
+    model_bundle = {
+        "framework": "pytorch",
+        "feature_columns": columns,
+        "fill_values": fill_values.to_dict(),
+        "norm_mean": norm_mean.tolist(),
+        "norm_std": norm_std.tolist(),
+        "models": model_entries,
+        "selected_model_names": [entry["config"]["name"] for entry in model_entries],
+        "holdout_season": int(holdout),
+        "device_used": str(device),
+    }
     metrics = evaluate_predictions(holdout_rows, holdout_predictions)
+    metrics["candidate_metrics"] = [
+        {
+            "name": result["config"].name,
+            "architecture": result["config"].architecture,
+            "best_epoch": int(result["best_epoch"]),
+            **result["val_metrics"],
+        }
+        for result in sorted(results, key=lambda r: (r["val_metrics"]["mse"], r["val_metrics"]["log_loss"]))
+    ]
+    metrics["selected_models"] = model_bundle["selected_model_names"]
+
     scored_holdout = holdout_rows[["season", "gender", "team1_id", "team2_id", "label"]].copy()
     scored_holdout["prediction"] = holdout_predictions
     return model_bundle, metrics, scored_holdout
 
 
-def fit_final_model(training_frame: pd.DataFrame, target_season: int) -> dict[str, Any]:
+def fit_final_model(
+    training_frame: pd.DataFrame,
+    target_season: int,
+    device_preference: str = "auto",
+    seed: int = 42,
+    selected_configs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     final_training_rows = training_frame[training_frame["season"] < target_season].reset_index(drop=True)
     if final_training_rows.empty:
         raise ValueError(f"No training rows are available before target season {target_season}.")
-    model_bundle = fit_ensemble(final_training_rows)
-    model_bundle["train_seasons"] = sorted(int(season) for season in final_training_rows["season"].unique())
-    model_bundle["target_season"] = int(target_season)
-    return model_bundle
+
+    columns = feature_columns()
+    fill_values = _feature_fill_values(final_training_rows, columns)
+    train_x = _feature_array(final_training_rows, columns, fill_values)
+    train_y = final_training_rows["label"].to_numpy(dtype=np.float32)
+    norm_mean, norm_std = _norm_stats(train_x)
+    device = resolve_device(device_preference)
+
+    if selected_configs is None:
+        configs = default_torch_candidates()[:3]
+    else:
+        configs = [_candidate_config_from_dict(cfg) for cfg in selected_configs]
+
+    model_entries: list[dict[str, Any]] = []
+    for i, config in enumerate(configs):
+        result = _train_torch_candidate(
+            train_x=train_x,
+            train_y=train_y,
+            val_x=train_x,
+            val_y=train_y,
+            config=config,
+            device=device,
+            seed=seed + i,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
+        )
+        model_entries.append(
+            {
+                "config": _candidate_to_dict(config),
+                "state_dict": result["state_dict"],
+                "best_epoch": result["best_epoch"],
+            }
+        )
+
+    return {
+        "framework": "pytorch",
+        "feature_columns": columns,
+        "fill_values": fill_values.to_dict(),
+        "norm_mean": norm_mean.tolist(),
+        "norm_std": norm_std.tolist(),
+        "models": model_entries,
+        "train_seasons": sorted(int(season) for season in final_training_rows["season"].unique()),
+        "target_season": int(target_season),
+        "selected_model_names": [entry["config"]["name"] for entry in model_entries],
+        "device_used": str(device),
+    }
 
 
-def generate_submission(model_bundle: dict[str, Any], submission_frame: pd.DataFrame) -> pd.DataFrame:
-    predictions = predict_ensemble(model_bundle, submission_frame)
+def generate_submission(
+    model_bundle: dict[str, Any], submission_frame: pd.DataFrame, device_preference: str = "auto"
+) -> pd.DataFrame:
+    predictions = predict_ensemble(model_bundle, submission_frame, device_preference=device_preference)
     return pd.DataFrame({"ID": submission_frame["ID"], "Pred": predictions})
 
 
 def save_model_bundle(model_bundle: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model_bundle, path)
+    torch.save(model_bundle, path)
 
 
 def save_metrics(metrics: dict[str, Any], path: Path) -> None:
