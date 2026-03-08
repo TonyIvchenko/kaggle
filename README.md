@@ -52,4 +52,5 @@ chmod 600 ~/.kaggle/kaggle.json
 
 - Python is pinned to `3.11`.
 - Root dependencies are intentionally lightweight and notebook-oriented.
-- Add competition-specific code wherever you want; a simple pattern is `competitions/<slug>/`.
+- Competition workspaces live under `competitions/`.
+- The first baseline is scaffolded in `competitions/march_machine_learning_mania_2026/`.
