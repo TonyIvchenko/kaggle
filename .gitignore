@@ -3,8 +3,8 @@ __pycache__/
 .ipynb_checkpoints/
 *.pyc
 
-competitions/*/data/raw/
-competitions/*/data/processed/
+competitions/*/data/raw/*
+competitions/*/data/processed/*
 competitions/*/models/*.joblib
 competitions/*/models/*.pkl
 competitions/*/models/*.json
