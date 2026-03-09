@@ -41,6 +41,7 @@ class DatasetBundle:
     train_frame: pd.DataFrame
     test_frame: pd.DataFrame
     sample_submission: pd.DataFrame
+    train_id_column: str
     id_column: str
     target_column: str
     source_columns: tuple[str, ...]
@@ -200,6 +201,25 @@ def _choose_source_columns(train: pd.DataFrame, test: pd.DataFrame, id_column: s
     return tuple(str(column) for column in columns)
 
 
+def _choose_train_id_column(train: pd.DataFrame, submission_id_column: str, target_column: str) -> str | None:
+    if submission_id_column in train.columns and submission_id_column != target_column:
+        return submission_id_column
+
+    preferred = ("oare_id", "train_id", "id", "ID", "Id")
+    for column in preferred:
+        if column in train.columns and column != target_column:
+            return str(column)
+
+    id_like = [
+        column
+        for column in train.columns
+        if column != target_column and ("_id" in str(column).lower() or str(column).lower().endswith("id"))
+    ]
+    if id_like:
+        return str(id_like[0])
+    return None
+
+
 def _combine_source_columns(frame: pd.DataFrame, source_columns: tuple[str, ...]) -> list[str]:
     parts = [frame[column].map(_clean_text) for column in source_columns]
     merged: list[str] = []
@@ -226,17 +246,26 @@ def build_datasets(files: CompetitionFiles, target_column: str | None = None) ->
 
     if target not in train.columns:
         raise ValueError(f"Target column '{target}' is not present in train.csv.")
-    if id_column not in train.columns or id_column not in test.columns:
-        raise ValueError(f"ID column '{id_column}' must be present in both train.csv and test.csv.")
+    if id_column not in test.columns:
+        raise ValueError(f"ID column '{id_column}' must be present in test.csv.")
+    if id_column not in sample_submission.columns:
+        raise ValueError(f"ID column '{id_column}' must be present in sample_submission.csv.")
 
-    train_targets = train[target].map(_clean_text).tolist()
-    train_sources = _combine_source_columns(train, source_columns=source_columns)
+    train_work = train.copy()
+    train_id_column = _choose_train_id_column(train_work, submission_id_column=id_column, target_column=target)
+    if train_id_column is None:
+        train_id_column = "_row_id"
+        train_work[train_id_column] = np.arange(len(train_work), dtype=np.int64)
+
+    train_targets = train_work[target].map(_clean_text).tolist()
+    train_sources = _combine_source_columns(train_work, source_columns=source_columns)
     test_sources = _combine_source_columns(test, source_columns=source_columns)
 
     return DatasetBundle(
-        train_frame=train.copy(),
+        train_frame=train_work,
         test_frame=test.copy(),
         sample_submission=sample_submission.copy(),
+        train_id_column=train_id_column,
         id_column=id_column,
         target_column=target,
         source_columns=source_columns,
@@ -742,11 +771,12 @@ def fit_and_score_holdout(
     best_row = result_rows[0]
 
     holdout_frame = dataset.train_frame.iloc[holdout_idx].copy()
-    holdout_predictions = holdout_frame[[dataset.id_column, dataset.target_column]].copy()
+    holdout_predictions = holdout_frame[[dataset.train_id_column, dataset.target_column]].copy()
     holdout_predictions["prediction"] = best_row["predictions"]
 
     model_selection = {
         "selected_strategy": best_row["strategy"],
+        "train_id_column": dataset.train_id_column,
         "id_column": dataset.id_column,
         "target_column": dataset.target_column,
         "source_columns": list(dataset.source_columns),
@@ -820,6 +850,7 @@ def fit_final_model(
     return {
         "framework": "retrieval",
         "competition": COMPETITION_SLUG,
+        "train_id_column": dataset.train_id_column,
         "id_column": dataset.id_column,
         "target_column": dataset.target_column,
         "source_columns": list(dataset.source_columns),
