@@ -18,7 +18,7 @@ Workspace for the Kaggle competition:
 ## Expected Data Flow
 
 ```bash
-python competitions/deep_past_initiative_machine_translation/scripts/download_data.py
+python competitions/deep_past_initiative_machine_translation/scripts/download_data.py --all-files
 python competitions/deep_past_initiative_machine_translation/scripts/train_model.py --device-preference mps
 python competitions/deep_past_initiative_machine_translation/scripts/build_doc_memory_submission.py
 ```
@@ -42,7 +42,7 @@ If download returns `403 Forbidden`, open the competition page in your browser a
   - PyTorch bi-encoder retriever (MPS/CPU)
   - confidence-threshold hybrid of both
 
-## Document-Level Submission Strategy
+## Advanced Submission Strategy
 
 `build_doc_memory_submission.py` is designed for test sets that contain grouped segments
 (for example, `text_id` + `line_start`).
@@ -50,9 +50,13 @@ If download returns `403 Forbidden`, open the competition page in your browser a
 Flow:
 
 1. Concatenate source rows inside each test document group.
-2. Retrieve the closest train document by character TF-IDF.
-3. If similarity crosses a threshold, split the matched train translation into row-level chunks using sentence partitioning.
-4. Fall back to row-level nearest-neighbor retrieval when grouped match confidence is low.
+2. Build sentence-level translation memory from supplemental files:
+   - `Sentences_Oare_FirstWord_LinNum.csv`
+   - `published_texts.csv`
+3. Retrieve top candidate documents from the sentence memory by character TF-IDF.
+4. Align grouped test rows to contiguous sentence spans inside each candidate document using dynamic programming.
+5. Blend document-level alignment confidence with document retrieval confidence.
+6. Fall back to row-level nearest-neighbor retrieval when document alignment confidence is low.
 
 It writes:
 
