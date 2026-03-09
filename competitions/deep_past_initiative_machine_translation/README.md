@@ -49,14 +49,17 @@ If download returns `403 Forbidden`, open the competition page in your browser a
 
 Flow:
 
-1. Concatenate source rows inside each test document group.
-2. Build sentence-level translation memory from supplemental files:
-   - `Sentences_Oare_FirstWord_LinNum.csv`
-   - `published_texts.csv`
-3. Retrieve top candidate documents from the sentence memory by character TF-IDF.
-4. Align grouped test rows to contiguous sentence spans inside each candidate document using dynamic programming.
-5. Blend document-level alignment confidence with document retrieval confidence.
-6. Fall back to row-level nearest-neighbor retrieval when document alignment confidence is low.
+1. Load and use all competition files:
+   - `train.csv`, `test.csv`, `sample_submission.csv`
+   - `Sentences_Oare_FirstWord_LinNum.csv`, `published_texts.csv`
+   - `OA_Lexicon_eBL.csv`, `eBL_Dictionary.csv`
+   - `publications.csv`, `bibliography.csv`, `resources.csv`
+2. Normalize transliteration tokens with lexicon mappings.
+3. Retrieve top candidate documents from sentence metadata by character TF-IDF.
+4. Use `line_start`/`line_end` and sentence `line_number` to select candidate sentence translations per row.
+5. Convert sentence-style translations into train-style output where possible via learned sentence-to-train mapping.
+6. Rerank candidates using retrieval confidence, line coverage, and an auxiliary English-vocabulary penalty built from supplemental corpora.
+7. Fall back to row-level nearest-neighbor retrieval when candidate coverage is weak.
 
 It writes:
 
