@@ -9,3 +9,7 @@ pytest>=8.0,<9
 scikit-learn>=1.5,<2
 seaborn>=0.13,<0.14
 torch>=2.4,<3
+transformers>=4.48,<5
+sentencepiece>=0.2,<0.3
+safetensors>=0.4,<1
+catboost>=1.2,<2

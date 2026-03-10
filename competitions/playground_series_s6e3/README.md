@@ -37,6 +37,11 @@ Optional flags:
 - Two candidates are evaluated on holdout:
   - linear pipeline (impute + one-hot + logistic/ridge)
   - tree pipeline (impute + ordinal encoding + histogram gradient boosting)
+- If `catboost` is installed, a third candidate is included automatically for classification tasks.
+- For binary classification with probability targets, selection priority is:
+  - highest AUC
+  - then lower log loss
+  - then higher accuracy
 - Best strategy is selected by holdout score and retrained on full train set.
 
 Artifacts written by trainer:
@@ -45,4 +50,3 @@ Artifacts written by trainer:
 - metrics: `models/playground_series_s6e3_metrics.json`
 - holdout predictions: `data/processed/holdout_predictions.csv`
 - submission: `submissions/submission.csv`
-
