@@ -92,7 +92,8 @@ def main() -> None:
         "training_rows": int(len(dataset.train_frame)),
         "test_rows": int(len(dataset.test_frame)),
         "id_column": dataset.id_column,
-        "target_column": dataset.target_column,
+        "target_columns": list(dataset.target_columns),
+        "output_mode": dataset.output_mode,
         "feature_columns": list(dataset.feature_columns),
         "selection": selection,
         "holdout_metrics": holdout_metrics,
@@ -113,4 +114,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -10,7 +10,7 @@ Workspace for Kaggle competition:
 
 - `scripts/download_data.py`: downloads competition files with Kaggle CLI
 - `scripts/train_model.py`: trains a baseline text model and writes submission
-- `models/baseline.py`: schema inference, text preprocessing, holdout scoring, submission generation
+- `models/baseline.py`: schema inference, text preprocessing, holdout scoring, submission generation (single-label or multi-probability)
 - `tests/`: unit tests for downloader and baseline behavior
 
 ## Quick Start
@@ -26,4 +26,3 @@ python competitions/llm_classification_finetuning/scripts/train_model.py
 - metrics: `models/llm_classification_finetuning_metrics.json`
 - holdout predictions: `data/processed/holdout_predictions.csv`
 - submission: `submissions/submission.csv`
-

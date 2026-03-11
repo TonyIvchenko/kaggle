@@ -60,7 +60,7 @@ def test_holdout_and_submission(tmp_path: Path):
     final_model = fit_final_model(dataset=dataset, selection=selection, seed=7)
     submission = generate_submission(final_model, dataset=dataset)
 
-    assert selection["selected_strategy"] in {"word_logreg", "word_svm", "char_svm"}
+    assert selection["selected_strategy"] == "word_svm"
     assert "accuracy" in metrics
     assert list(submission.columns) == ["id", "label"]
     assert list(holdout_predictions.columns) == ["id", "label", "prediction"]
