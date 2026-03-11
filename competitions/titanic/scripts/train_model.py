@@ -63,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional strategy override (e.g. linear, forest, hist, xgboost, lightgbm, catboost).",
     )
+    parser.add_argument(
+        "--decision-threshold",
+        type=float,
+        default=None,
+        help="Optional positive-class decision threshold for final submission (default: 0.5).",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     return parser.parse_args()
 
@@ -89,6 +95,9 @@ def main() -> None:
     if args.force_strategy:
         selection["selected_strategy"] = str(args.force_strategy).strip()
         holdout_metrics["selected_strategy"] = str(args.force_strategy).strip()
+    if args.decision_threshold is not None:
+        selection["decision_threshold"] = float(args.decision_threshold)
+        holdout_metrics["decision_threshold"] = float(args.decision_threshold)
     holdout_predictions.to_csv(holdout_predictions_path, index=False)
 
     final_model = fit_final_model(dataset=dataset, selection=selection, seed=args.seed)
