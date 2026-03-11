@@ -57,6 +57,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional target column override when schema inference is ambiguous.",
     )
+    parser.add_argument(
+        "--force-strategy",
+        type=str,
+        default=None,
+        help="Optional strategy override (e.g. linear, forest, hist, xgboost, lightgbm, catboost).",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     return parser.parse_args()
 
@@ -80,6 +86,9 @@ def main() -> None:
         holdout_fraction=args.holdout_fraction,
         seed=args.seed,
     )
+    if args.force_strategy:
+        selection["selected_strategy"] = str(args.force_strategy).strip()
+        holdout_metrics["selected_strategy"] = str(args.force_strategy).strip()
     holdout_predictions.to_csv(holdout_predictions_path, index=False)
 
     final_model = fit_final_model(dataset=dataset, selection=selection, seed=args.seed)
@@ -125,4 +134,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

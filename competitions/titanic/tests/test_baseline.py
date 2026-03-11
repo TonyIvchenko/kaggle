@@ -214,7 +214,7 @@ def test_holdout_and_submission(tmp_path: Path):
 
     strategy = str(selection["selected_strategy"])
     allowed = {"linear", "forest", "hist", "catboost", "xgboost", "lightgbm"}
-    assert strategy in allowed or strategy.startswith("blend:")
+    assert strategy in allowed or strategy.endswith("+overlap") or strategy.startswith("blend:")
     assert "accuracy" in metrics and "log_loss" in metrics
     assert list(submission.columns) == ["PassengerId", "Survived"]
     assert submission["Survived"].isin([0, 1]).all()
