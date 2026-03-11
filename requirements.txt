@@ -13,3 +13,5 @@ transformers>=4.48,<5
 sentencepiece>=0.2,<0.3
 safetensors>=0.4,<1
 catboost>=1.2,<2
+lightgbm>=4.5,<5
+xgboost>=2.1,<3

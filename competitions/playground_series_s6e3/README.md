@@ -10,6 +10,7 @@ Workspace for Kaggle competition:
 
 - `scripts/download_data.py`: downloads competition files via Kaggle CLI
 - `scripts/train_model.py`: runs holdout evaluation, trains final model, writes submission
+- `scripts/train_ensemble.py`: trains a blended CatBoost + LightGBM ensemble and writes submission
 - `models/baseline.py`: schema inference, tabular model candidates, evaluation utilities
 - `notebooks/playground_series_s6e3.ipynb`: quick schema + metrics notebook
 - `tests/`: unit tests for downloader and baseline pipeline
@@ -19,6 +20,8 @@ Workspace for Kaggle competition:
 ```bash
 python competitions/playground_series_s6e3/scripts/download_data.py
 python competitions/playground_series_s6e3/scripts/train_model.py
+# optional stronger local ensemble
+python competitions/playground_series_s6e3/scripts/train_ensemble.py
 ```
 
 Optional flags:
@@ -43,6 +46,10 @@ Optional flags:
   - then lower log loss
   - then higher accuracy
 - Best strategy is selected by holdout score and retrained on full train set.
+- Ensemble script searches blend weights on holdout for:
+  - `catboost_a` (tuned CatBoost)
+  - `lightgbm` (one-hot boosted tree model)
+  - `xgboost` (hist gradient-boosted tree model)
 
 Artifacts written by trainer:
 
