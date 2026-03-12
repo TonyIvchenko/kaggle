@@ -5,6 +5,8 @@ __pycache__/
 .DS_Store
 .kaggle/
 **/.kaggle/
+.kaggle_kernels/
+**/.kaggle_kernels/
 kaggle.json
 **/kaggle.json
 
