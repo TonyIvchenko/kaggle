@@ -19,6 +19,7 @@ competitions/*/models/*.json
 competitions/deep_past_initiative_machine_translation/models/transformer_editor/
 competitions/*/submissions/*.csv
 competitions/*/submissions/*.zip
+competitions/README.md
 !competitions/*/data/raw/.gitkeep
 !competitions/*/data/processed/.gitkeep
 !competitions/*/submissions/.gitkeep

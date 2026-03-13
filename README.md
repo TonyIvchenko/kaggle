@@ -1,22 +1,22 @@
 # Kaggle
 
-Minimal workspace for Kaggle experiments, notebooks, and one-off modeling runs.
+Workspace for KAggle experiments
 
 ## Files
 
-- `requirements.txt`: shared Python dependencies for the repo
-- `environment.yml`: conda environment definition that installs `requirements.txt`
-- `Makefile`: setup/update helpers plus Jupyter kernel registration
+- `requirements.txt`: shared dependencies
+- `environment.yml`: conda environment with `requirements.txt`
+- `Makefile`: setup/update helpers with Jupyter kernel registration
 
 ## Setup
 
-Create the conda environment and register the notebook kernel:
+Create conda environment and register Jupyter kernel:
 
 ```bash
 make setup
 ```
 
-This creates a conda environment named `kaggle` and installs a Jupyter kernel named `Python (kaggle)`.
+Creates conda environment named `kaggle` and installs a Jupyter kernel named `Kaggle`.
 
 ## Update Environment
 
@@ -24,7 +24,7 @@ This creates a conda environment named `kaggle` and installs a Jupyter kernel na
 make update
 ```
 
-This updates the conda environment and refreshes the Jupyter kernel registration.
+Updates conda environment and refreshes Jupyter kernel registration
 
 ## Start Jupyter Lab
 
@@ -32,17 +32,11 @@ This updates the conda environment and refreshes the Jupyter kernel registration
 make lab
 ```
 
-Then select the `Python (kaggle)` kernel inside Jupyter.
+And select the `Kaggle` kernel inside Jupyter
 
 ## Kaggle API Auth
 
-If you want to use the Kaggle API locally, place your `kaggle.json` credentials file at:
-
-```bash
-~/.kaggle/kaggle.json
-```
-
-and lock down permissions:
+If you want to use Kaggle API, add your credentials to `~/.kaggle/kaggle.json` and set permissions:
 
 ```bash
 chmod 600 ~/.kaggle/kaggle.json
@@ -50,7 +44,6 @@ chmod 600 ~/.kaggle/kaggle.json
 
 ## Notes
 
-- Python is pinned to `3.11`.
-- Root dependencies are intentionally lightweight and notebook-oriented.
-- Competition workspaces live under `competitions/`.
-- The first baseline is scaffolded in `competitions/march_machine_learning_mania_2026/`.
+- Python is pinned to `3.11`
+- Root dependencies are intentionally lightweight
+- Competition workspaces live under `competitions/`
