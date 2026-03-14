@@ -16,7 +16,7 @@ Create conda environment and register Jupyter kernel:
 make setup
 ```
 
-Creates conda environment named `kaggle` and installs a Jupyter kernel named `Kaggle`.
+Creates conda environment named `kaggle` and installs a Jupyter kernel named `Python (kaggle)`.
 
 ## Update Environment
 
@@ -32,7 +32,7 @@ Updates conda environment and refreshes Jupyter kernel registration
 make lab
 ```
 
-And select the `Kaggle` kernel inside Jupyter
+And select the `Python (kaggle)` kernel inside Jupyter
 
 ## Kaggle API Auth
 
