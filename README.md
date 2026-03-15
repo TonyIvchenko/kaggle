@@ -34,6 +34,14 @@ make lab
 
 And select the `Python (kaggle)` kernel inside Jupyter
 
+## Clean Local Junk
+
+```bash
+make clean
+```
+
+Removes disposable local artifacts such as `.pytest_cache`, `.kaggle_kernels`, `.ipynb_checkpoints`, `__pycache__`, `*.pyc`, and `.DS_Store`.
+
 ## Kaggle API Auth
 
 If you want to use Kaggle API, add your credentials to `~/.kaggle/kaggle.json` and set permissions:

@@ -4,22 +4,15 @@ __pycache__/
 *.pyc
 .DS_Store
 .kaggle/
-**/.kaggle/
 .kaggle_kernels/
-**/.kaggle_kernels/
 kaggle.json
-**/kaggle.json
 
+competitions/README.md
 competitions/*/data/raw/*
 competitions/*/data/processed/*
-competitions/*/models/*.joblib
-competitions/*/models/*.pkl
-competitions/*/models/*.pt
-competitions/*/models/*.json
-competitions/deep_past_initiative_machine_translation/models/transformer_editor/
-competitions/*/submissions/*.csv
-competitions/*/submissions/*.zip
-competitions/README.md
+competitions/*/models/*
+!competitions/*/models/*.py
+competitions/*/submissions/*
 !competitions/*/data/raw/.gitkeep
 !competitions/*/data/processed/.gitkeep
 !competitions/*/submissions/.gitkeep

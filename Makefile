@@ -2,7 +2,7 @@ env := kaggle
 kernel_name := kaggle
 kernel_display_name := Python (kaggle)
 
-.PHONY: setup update kernel lab
+.PHONY: setup update kernel lab clean
 
 setup: environment.yml
 	conda env create -f environment.yml
@@ -22,3 +22,7 @@ kernel:
 
 lab:
 	conda run -n $(env) jupyter lab
+
+clean:
+	find . -type d \( -name '.pytest_cache' -o -name '.kaggle_kernels' -o -name '.ipynb_checkpoints' -o -name '__pycache__' \) -prune -exec rm -rf {} +
+	find . -type f \( -name '*.pyc' -o -name '.DS_Store' \) -delete
