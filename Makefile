@@ -26,3 +26,14 @@ lab:
 clean:
 	find . -type d \( -name '.pytest_cache' -o -name '.kaggle_kernels' -o -name '.ipynb_checkpoints' -o -name '__pycache__' \) -prune -exec rm -rf {} +
 	find . -type f \( -name '*.pyc' -o -name '.DS_Store' \) -delete
+	@for dir in competitions/*/data/raw competitions/*/data/processed competitions/*/submissions; do \
+		if [ -d "$$dir" ]; then \
+			find "$$dir" -mindepth 1 ! -name '.gitkeep' -exec rm -rf {} +; \
+		fi; \
+	done
+	@for dir in competitions/*/models; do \
+		if [ -d "$$dir" ]; then \
+			find "$$dir" -mindepth 1 -type f ! -name '*.py' ! -name '.gitkeep' -delete; \
+			find "$$dir" -depth -mindepth 1 -type d -empty -delete; \
+		fi; \
+	done

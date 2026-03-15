@@ -34,13 +34,13 @@ make lab
 
 And select the `Python (kaggle)` kernel inside Jupyter
 
-## Clean Local Junk
+## Clean repo (delete temporary files)
 
 ```bash
 make clean
 ```
 
-Removes disposable local artifacts such as `.pytest_cache`, `.kaggle_kernels`, `.ipynb_checkpoints`, `__pycache__`, `*.pyc`, and `.DS_Store`.
+Deletes files under `data/raw`, `data/processed` and `submissions` folders, deleted non-Python files under `models`
 
 ## Kaggle API Auth
 
