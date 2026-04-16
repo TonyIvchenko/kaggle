@@ -5,6 +5,8 @@ from pathlib import Path
 import pandas as pd
 
 from competitions.store_sales_time_series_forecasting.models.baseline import (
+    _build_encoders,
+    _prepare_supervised_training_frame,
     build_dataset,
     discover_competition_files,
     fit_and_score_holdout,
@@ -125,3 +127,31 @@ def test_holdout_and_submission(tmp_path: Path):
     assert list(submission.columns) == ["id", "sales"]
     assert len(submission) == 8
     assert submission["sales"].ge(0).all()
+
+
+def test_max_train_rows_keeps_most_recent_dates(tmp_path: Path):
+    raw_dir = _prepare_dir(tmp_path)
+    dataset = build_dataset(discover_competition_files(raw_dir))
+    encoders = _build_encoders(dataset)
+
+    capped = _prepare_supervised_training_frame(
+        dataset=dataset,
+        encoders=encoders,
+        cutoff_date=None,
+        recent_train_start=None,
+        max_train_rows=10,
+    )
+    full = _prepare_supervised_training_frame(
+        dataset=dataset,
+        encoders=encoders,
+        cutoff_date=None,
+        recent_train_start=None,
+        max_train_rows=None,
+    )
+
+    assert len(capped) == 10
+    # The cap must retain the latest dates across *all* groups, not just the
+    # last store/family block, so both families survive and the newest date is kept.
+    assert capped["family"].nunique() == 2
+    assert capped["date"].max() == full["date"].max()
+    assert capped["date"].min() > full["date"].min()

@@ -350,7 +350,12 @@ def _prepare_supervised_training_frame(
     if recent_train_start:
         feature_source = feature_source.loc[feature_source["date"] >= pd.Timestamp(recent_train_start)].copy()
     if max_train_rows is not None and len(feature_source) > max_train_rows:
-        feature_source = feature_source.iloc[-int(max_train_rows) :].copy()
+        # Keep the most *recent* rows, not the tail of the (store, family, date)
+        # sort order. A plain ``iloc[-N:]`` biases the cap toward the highest
+        # store/family groups; sorting by date first keeps the latest history.
+        feature_source = (
+            feature_source.sort_values("date", kind="stable").iloc[-int(max_train_rows) :].copy()
+        )
 
     feature_source = feature_source.reset_index(drop=True)
     return feature_source
