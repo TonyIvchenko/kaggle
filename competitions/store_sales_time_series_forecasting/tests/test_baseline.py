@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from competitions.store_sales_time_series_forecasting.models.baseline import (
+    _aggregate_holiday_features,
     _build_encoders,
     _prepare_supervised_training_frame,
     build_dataset,
@@ -127,6 +128,26 @@ def test_holdout_and_submission(tmp_path: Path):
     assert list(submission.columns) == ["id", "sales"]
     assert len(submission) == 8
     assert submission["sales"].ge(0).all()
+
+
+def test_holiday_activeness_handles_transferred_and_transfer_rows():
+    holidays = pd.DataFrame(
+        [
+            {"date": "2017-01-05", "type": "Holiday", "locale": "National", "locale_name": "Ecuador", "transferred": False},
+            {"date": "2017-01-06", "type": "Holiday", "locale": "National", "locale_name": "Ecuador", "transferred": True},
+            {"date": "2017-01-08", "type": "Transfer", "locale": "National", "locale_name": "Ecuador", "transferred": False},
+        ]
+    )
+    holidays["date"] = pd.to_datetime(holidays["date"])
+
+    aggregated = _aggregate_holiday_features(holidays, locale="National", group_key=None, prefix="national")
+    counts = aggregated.set_index("date")["national_holiday_count"]
+
+    assert counts[pd.Timestamp("2017-01-05")] == 1  # ordinary holiday counts
+    assert counts[pd.Timestamp("2017-01-06")] == 0  # transferred-away holiday does not
+    assert counts[pd.Timestamp("2017-01-08")] == 1  # the Transfer destination does
+    transferred = aggregated.set_index("date")["national_transferred_count"]
+    assert transferred[pd.Timestamp("2017-01-06")] == 1
 
 
 def test_max_train_rows_keeps_most_recent_dates(tmp_path: Path):

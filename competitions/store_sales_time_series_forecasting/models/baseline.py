@@ -217,12 +217,18 @@ def _aggregate_holiday_features(
     else:
         group_columns = ["date"]
 
-    subset["is_holiday"] = subset["type"].eq("Holiday").astype("int8")
-    subset["is_event"] = subset["type"].eq("Event").astype("int8")
-    subset["is_additional"] = subset["type"].eq("Additional").astype("int8")
-    subset["is_bridge"] = subset["type"].eq("Bridge").astype("int8")
-    subset["is_workday"] = subset["type"].eq("Work Day").astype("int8")
-    subset["is_transferred"] = subset["transferred"].astype("int8")
+    transferred = subset["transferred"].fillna(False).astype(bool)
+    type_col = subset["type"].astype("string")
+    # A "Holiday" with transferred=True did NOT happen on this date (it was moved
+    # elsewhere), while a "Transfer" row marks the date the day off actually lands.
+    # Treat the latter as an active holiday and drop the former from the count.
+    is_active_holiday = (type_col.eq("Holiday") & ~transferred) | type_col.eq("Transfer")
+    subset["is_holiday"] = is_active_holiday.astype("int8")
+    subset["is_event"] = type_col.eq("Event").astype("int8")
+    subset["is_additional"] = type_col.eq("Additional").astype("int8")
+    subset["is_bridge"] = type_col.eq("Bridge").astype("int8")
+    subset["is_workday"] = type_col.eq("Work Day").astype("int8")
+    subset["is_transferred"] = transferred.astype("int8")
 
     aggregated = (
         subset.groupby(group_columns, observed=True)
