@@ -93,6 +93,9 @@ def main() -> None:
     dataset.test_frame.head(2000).to_csv(test_preview_path, index=False)
 
     candidate_strategies = [part.strip() for part in args.candidate_strategies.split(",") if part.strip()]
+    force_strategy = str(args.force_strategy).strip() if args.force_strategy else None
+    if force_strategy and force_strategy not in candidate_strategies:
+        candidate_strategies.append(force_strategy)
     selection, holdout_metrics, holdout_predictions = fit_and_score_holdout(
         dataset=dataset,
         holdout_days=args.holdout_days,
@@ -100,10 +103,8 @@ def main() -> None:
         max_train_rows=args.max_train_rows,
         candidate_strategies=tuple(candidate_strategies),
         seed=args.seed,
+        force_strategy=force_strategy,
     )
-    if args.force_strategy:
-        selection["selected_strategy"] = str(args.force_strategy).strip()
-        holdout_metrics["selected_strategy"] = str(args.force_strategy).strip()
     holdout_predictions.to_csv(holdout_predictions_path, index=False)
 
     final_model = fit_final_model(

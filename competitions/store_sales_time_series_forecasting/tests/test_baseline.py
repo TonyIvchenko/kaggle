@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from competitions.store_sales_time_series_forecasting.models.baseline import (
     _aggregate_holiday_features,
@@ -128,6 +129,37 @@ def test_holdout_and_submission(tmp_path: Path):
     assert list(submission.columns) == ["id", "sales"]
     assert len(submission) == 8
     assert submission["sales"].ge(0).all()
+
+
+def test_force_strategy_reports_its_own_metrics(tmp_path: Path):
+    dataset = build_dataset(discover_competition_files(_prepare_dir(tmp_path)))
+
+    selection, metrics, _ = fit_and_score_holdout(
+        dataset=dataset,
+        holdout_days=4,
+        recent_train_start="2017-01-10",
+        max_train_rows=5000,
+        candidate_strategies=("seasonal_naive",),
+        seed=7,
+        force_strategy="seasonal_naive",
+    )
+
+    assert selection["selected_strategy"] == "seasonal_naive"
+    by_name = {row["name"]: row for row in metrics["strategy_metrics"]}
+    assert metrics["rmsle"] == by_name["seasonal_naive"]["rmsle"]
+    assert metrics["mae"] == by_name["seasonal_naive"]["mae"]
+
+
+def test_force_strategy_must_be_a_candidate(tmp_path: Path):
+    dataset = build_dataset(discover_competition_files(_prepare_dir(tmp_path)))
+
+    with pytest.raises(ValueError):
+        fit_and_score_holdout(
+            dataset=dataset,
+            holdout_days=4,
+            candidate_strategies=("seasonal_naive",),
+            force_strategy="lightgbm",
+        )
 
 
 def test_holiday_activeness_handles_transferred_and_transfer_rows():

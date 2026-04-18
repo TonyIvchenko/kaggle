@@ -578,8 +578,14 @@ def fit_and_score_holdout(
     max_train_rows: int | None = 1_200_000,
     candidate_strategies: tuple[str, ...] = ("seasonal_naive", "lightgbm", "xgboost"),
     seed: int = 42,
+    force_strategy: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], pd.DataFrame]:
     encoders = _build_encoders(dataset)
+    if force_strategy is not None and force_strategy not in candidate_strategies:
+        raise ValueError(
+            f"force_strategy={force_strategy!r} must be one of the candidate strategies "
+            f"{list(candidate_strategies)} so its holdout metrics can be reported."
+        )
     train_dates = np.sort(dataset.train_frame["date"].drop_duplicates().to_numpy())
     if holdout_days <= 0 or holdout_days >= len(train_dates):
         raise ValueError("holdout_days must be between 1 and the number of unique train dates - 1.")
@@ -643,7 +649,12 @@ def fit_and_score_holdout(
         holdout_predictions_by_strategy[strategy] = predicted
 
     strategy_metrics.sort(key=lambda row: (row["rmsle"], row["mae"], row["name"]))
-    selected_strategy = str(strategy_metrics[0]["name"])
+    metrics_by_name = {str(row["name"]): row for row in strategy_metrics}
+    if force_strategy is not None:
+        selected_strategy = str(force_strategy)
+    else:
+        selected_strategy = str(strategy_metrics[0]["name"])
+    selected_metrics = metrics_by_name[selected_strategy]
     selected_predictions = holdout_predictions_by_strategy[selected_strategy]
     selection = {
         "selected_strategy": selected_strategy,
@@ -655,8 +666,8 @@ def fit_and_score_holdout(
     }
     holdout_metrics = {
         "selected_strategy": selected_strategy,
-        "rmsle": float(strategy_metrics[0]["rmsle"]),
-        "mae": float(strategy_metrics[0]["mae"]),
+        "rmsle": float(selected_metrics["rmsle"]),
+        "mae": float(selected_metrics["mae"]),
         "strategy_metrics": strategy_metrics,
     }
     holdout_predictions = selected_predictions.loc[
