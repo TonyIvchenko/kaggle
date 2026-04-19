@@ -443,6 +443,17 @@ def _feature_matrix(frame: pd.DataFrame, fill_values: dict[str, float]) -> pd.Da
     return matrix.astype("float32")
 
 
+def _log_target(sales: Any) -> np.ndarray:
+    """Log1p-transform the regression target, guarding against negative sales.
+
+    Sales are non-negative by definition, but returns/refunds or corrupted rows
+    can produce small negatives that would make ``log1p`` emit NaN and poison
+    training. Clip to zero first so the transform stays finite.
+    """
+    values = np.asarray(sales, dtype=np.float32)
+    return np.log1p(np.clip(values, 0.0, None))
+
+
 def _recent_sample_weight(frame: pd.DataFrame) -> np.ndarray:
     day_index = (frame["date"] - frame["date"].min()).dt.days.to_numpy(dtype=np.float32)
     if len(day_index) == 0:
@@ -467,7 +478,7 @@ def _fit_trained_strategy(
 ) -> dict[str, Any]:
     fill_values = _training_fill_values(train_frame)
     x_train = _feature_matrix(train_frame, fill_values=fill_values)
-    y_train = np.log1p(train_frame["sales"].to_numpy(dtype=np.float32))
+    y_train = _log_target(train_frame["sales"].to_numpy())
     sample_weight = _recent_sample_weight(train_frame)
 
     if strategy == "lightgbm":

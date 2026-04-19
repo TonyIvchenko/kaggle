@@ -5,9 +5,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import numpy as np
+
 from competitions.store_sales_time_series_forecasting.models.baseline import (
     _aggregate_holiday_features,
     _build_encoders,
+    _log_target,
     _prepare_supervised_training_frame,
     build_dataset,
     discover_competition_files,
@@ -129,6 +132,15 @@ def test_holdout_and_submission(tmp_path: Path):
     assert list(submission.columns) == ["id", "sales"]
     assert len(submission) == 8
     assert submission["sales"].ge(0).all()
+
+
+def test_log_target_clips_negatives_and_stays_finite():
+    transformed = _log_target([-5.0, 0.0, np.expm1(1.0)])
+
+    assert np.isfinite(transformed).all()
+    assert transformed[0] == 0.0  # negative sales clip to log1p(0)
+    assert transformed[1] == 0.0
+    assert transformed[2] == pytest.approx(1.0, rel=1e-5)
 
 
 def test_force_strategy_reports_its_own_metrics(tmp_path: Path):
