@@ -9,6 +9,7 @@ import numpy as np
 
 from competitions.store_sales_time_series_forecasting.models.baseline import (
     _aggregate_holiday_features,
+    _build_base_frame,
     _build_encoders,
     _log_target,
     _prepare_supervised_training_frame,
@@ -132,6 +133,21 @@ def test_holdout_and_submission(tmp_path: Path):
     assert list(submission.columns) == ["id", "sales"]
     assert len(submission) == 8
     assert submission["sales"].ge(0).all()
+
+
+def test_transactions_dow_mean_feature_is_populated(tmp_path: Path):
+    dataset = build_dataset(discover_competition_files(_prepare_dir(tmp_path)))
+    encoders = _build_encoders(dataset)
+
+    base = _build_base_frame(dataset.train_frame, dataset=dataset, encoders=encoders)
+
+    assert "transactions_dow_mean" in base.columns
+    assert base["transactions_dow_mean"].notna().all()
+    assert (base["transactions_dow_mean"] > 0).all()
+
+    # The test horizon has no transactions of its own but still gets the profile.
+    test_base = _build_base_frame(dataset.test_frame, dataset=dataset, encoders=encoders)
+    assert test_base["transactions_dow_mean"].notna().all()
 
 
 def test_log_target_clips_negatives_and_stays_finite():

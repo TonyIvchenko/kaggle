@@ -48,6 +48,7 @@ BASE_FEATURE_COLUMNS = [
     "type_code",
     "cluster",
     "oil",
+    "transactions_dow_mean",
     "dayofweek",
     "day",
     "month",
@@ -193,6 +194,27 @@ def _prepare_oil_frame(dataset: DatasetBundle) -> pd.DataFrame:
     return oil
 
 
+def _prepare_transaction_profile(dataset: DatasetBundle) -> pd.DataFrame:
+    """Average transactions per (store, day-of-week).
+
+    The transactions file only covers the training period (the test horizon has
+    none), so instead of forecasting it we summarise it into a stable per-store
+    weekly seasonality profile that can be joined onto both train and test rows.
+    """
+    transactions = dataset.transactions_frame.loc[:, ["date", "store_nbr", "transactions"]].copy()
+    transactions["date"] = pd.to_datetime(transactions["date"])
+    transactions["store_nbr"] = transactions["store_nbr"].astype("int16")
+    transactions["dayofweek"] = transactions["date"].dt.dayofweek.astype("int8")
+    profile = (
+        transactions.groupby(["store_nbr", "dayofweek"], observed=True)["transactions"]
+        .mean()
+        .reset_index()
+        .rename(columns={"transactions": "transactions_dow_mean"})
+    )
+    profile["transactions_dow_mean"] = profile["transactions_dow_mean"].astype("float32")
+    return profile
+
+
 def _aggregate_holiday_features(
     holidays: pd.DataFrame,
     locale: str,
@@ -301,6 +323,17 @@ def _build_base_frame(frame: pd.DataFrame, dataset: DatasetBundle, encoders: dic
     work["is_month_start"] = date_parts.is_month_start.astype("int8")
     work["is_month_end"] = date_parts.is_month_end.astype("int8")
     work["is_payday"] = date_parts.day.isin([1, 15]).astype("int8")
+
+    transaction_profile = _prepare_transaction_profile(dataset)
+    work = work.merge(transaction_profile, on=["store_nbr", "dayofweek"], how="left", validate="many_to_one")
+    overall_mean = (
+        float(transaction_profile["transactions_dow_mean"].mean())
+        if not transaction_profile.empty
+        else 0.0
+    )
+    if np.isnan(overall_mean):
+        overall_mean = 0.0
+    work["transactions_dow_mean"] = work["transactions_dow_mean"].fillna(overall_mean).astype("float32")
 
     sort_columns = ["store_nbr", "family", "date"]
     return work.sort_values(sort_columns).reset_index(drop=True)
