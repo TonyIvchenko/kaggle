@@ -39,6 +39,11 @@ PROMO_LAGS = (1, 7, 14, 28)
 PROMO_ROLL_WINDOWS = (7, 14)
 HISTORY_LENGTH = max(max(SALES_LAGS), max(ROLL_WINDOWS), max(PROMO_LAGS), max(PROMO_ROLL_WINDOWS)) + 8
 
+# Reserve the most recent calendar days of the supervised frame as an early-stopping
+# validation set for the gradient-boosted models.
+EARLY_STOPPING_VALID_DAYS = 28
+EARLY_STOPPING_ROUNDS = 50
+
 BASE_FEATURE_COLUMNS = [
     "store_nbr",
     "family_code",
@@ -504,15 +509,45 @@ def _xgboost_available() -> bool:
     return xgb is not None
 
 
+def _time_validation_split(
+    frame: pd.DataFrame, valid_days: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split off the most recent ``valid_days`` calendar days for early stopping.
+
+    Returns ``(train_part, valid_part)``. When there is not enough history to
+    carve out a non-empty split on both sides, the validation part is empty and
+    callers fall back to training on the full frame without early stopping.
+    """
+    unique_dates = np.sort(frame["date"].drop_duplicates().to_numpy())
+    if valid_days <= 0 or len(unique_dates) <= valid_days + 1:
+        return frame, frame.iloc[0:0]
+    cutoff = pd.Timestamp(unique_dates[-valid_days])
+    train_part = frame.loc[frame["date"] < cutoff]
+    valid_part = frame.loc[frame["date"] >= cutoff]
+    if train_part.empty or valid_part.empty:
+        return frame, frame.iloc[0:0]
+    return train_part, valid_part
+
+
 def _fit_trained_strategy(
     train_frame: pd.DataFrame,
     strategy: str,
     seed: int,
 ) -> dict[str, Any]:
+    # Compute fill values on the full frame so train/validation share the same
+    # imputation, then carve off the most recent days for early stopping.
     fill_values = _training_fill_values(train_frame)
-    x_train = _feature_matrix(train_frame, fill_values=fill_values)
-    y_train = _log_target(train_frame["sales"].to_numpy())
-    sample_weight = _recent_sample_weight(train_frame)
+    fit_frame, valid_frame = _time_validation_split(train_frame, EARLY_STOPPING_VALID_DAYS)
+    use_early_stopping = not valid_frame.empty
+
+    x_train = _feature_matrix(fit_frame, fill_values=fill_values)
+    y_train = _log_target(fit_frame["sales"].to_numpy())
+    sample_weight = _recent_sample_weight(fit_frame)
+    eval_set = None
+    if use_early_stopping:
+        x_valid = _feature_matrix(valid_frame, fill_values=fill_values)
+        y_valid = _log_target(valid_frame["sales"].to_numpy())
+        eval_set = [(x_valid, y_valid)]
 
     if strategy == "lightgbm":
         if not _lightgbm_available():
@@ -531,11 +566,18 @@ def _fit_trained_strategy(
             random_state=seed,
             n_jobs=-1,
         )
-        model.fit(x_train, y_train, sample_weight=sample_weight)
+        fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
+        if use_early_stopping:
+            fit_kwargs["eval_set"] = eval_set
+            fit_kwargs["callbacks"] = [
+                lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
+                lgb.log_evaluation(0),
+            ]
+        model.fit(x_train, y_train, **fit_kwargs)
     elif strategy == "xgboost":
         if not _xgboost_available():
             raise RuntimeError("xgboost strategy selected but xgboost is not installed.")
-        model = xgb.XGBRegressor(
+        xgb_params: dict[str, Any] = dict(
             objective="reg:squarederror",
             n_estimators=550,
             learning_rate=0.05,
@@ -549,7 +591,14 @@ def _fit_trained_strategy(
             random_state=seed,
             n_jobs=-1,
         )
-        model.fit(x_train, y_train, sample_weight=sample_weight)
+        if use_early_stopping:
+            xgb_params["early_stopping_rounds"] = EARLY_STOPPING_ROUNDS
+        model = xgb.XGBRegressor(**xgb_params)
+        fit_kwargs = {"sample_weight": sample_weight}
+        if use_early_stopping:
+            fit_kwargs["eval_set"] = eval_set
+            fit_kwargs["verbose"] = False
+        model.fit(x_train, y_train, **fit_kwargs)
     else:
         raise ValueError(f"Unsupported trained strategy: {strategy}")
 
