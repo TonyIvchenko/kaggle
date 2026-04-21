@@ -33,6 +33,14 @@ DEFAULT_METRICS_PATH = DEFAULT_PROCESSED_DIR / "metrics.json"
 DEFAULT_SUBMISSION_PATH = COMPETITION_ROOT / "submissions" / "submission.csv"
 
 GROUP_COLUMNS = ("store_nbr", "family")
+HOLIDAY_COUNT_SUFFIXES = (
+    "holiday_count",
+    "event_count",
+    "additional_count",
+    "bridge_count",
+    "workday_count",
+    "transferred_count",
+)
 SALES_LAGS = (1, 7, 14, 28, 56, 364)
 ROLL_WINDOWS = (7, 14, 28)
 PROMO_LAGS = (1, 7, 14, 28)
@@ -229,14 +237,9 @@ def _aggregate_holiday_features(
     subset = holidays.loc[holidays["locale"].eq(locale)].copy()
     if subset.empty:
         merge_columns = ["date"] if group_key is None else ["date", group_key]
-        return pd.DataFrame(columns=[*merge_columns, *[f"{prefix}_{name}" for name in (
-            "holiday_count",
-            "event_count",
-            "additional_count",
-            "bridge_count",
-            "workday_count",
-            "transferred_count",
-        )]])
+        return pd.DataFrame(
+            columns=[*merge_columns, *[f"{prefix}_{name}" for name in HOLIDAY_COUNT_SUFFIXES]]
+        )
 
     if group_key is not None:
         subset = subset.rename(columns={"locale_name": group_key})
@@ -286,12 +289,7 @@ def _merge_holiday_features(frame: pd.DataFrame, holidays: pd.DataFrame) -> pd.D
     holiday_columns = [
         column
         for column in work.columns
-        if column.endswith("_holiday_count")
-        or column.endswith("_event_count")
-        or column.endswith("_additional_count")
-        or column.endswith("_bridge_count")
-        or column.endswith("_workday_count")
-        or column.endswith("_transferred_count")
+        if any(column.endswith(f"_{suffix}") for suffix in HOLIDAY_COUNT_SUFFIXES)
     ]
     for column in holiday_columns:
         work[column] = pd.to_numeric(work[column], errors="coerce").fillna(0.0).astype("float32")
