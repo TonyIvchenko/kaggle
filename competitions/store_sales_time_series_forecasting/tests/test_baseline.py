@@ -133,6 +133,11 @@ def test_holdout_and_submission(tmp_path: Path):
     assert list(submission.columns) == ["id", "sales"]
     assert len(submission) == 8
     assert submission["sales"].ge(0).all()
+    # Submission invariants enforced by generate_submission.
+    assert len(submission) == len(dataset.sample_submission)
+    assert set(submission["id"]) == set(dataset.sample_submission["id"])
+    assert submission["id"].is_unique
+    assert np.isfinite(submission["sales"].to_numpy()).all()
 
 
 def test_transactions_dow_mean_feature_is_populated(tmp_path: Path):

@@ -816,9 +816,20 @@ def generate_submission(model_bundle: dict[str, Any], dataset: DatasetBundle) ->
         future_frame=test_future,
     )
     submission = predicted.loc[:, [dataset.id_column, "prediction"]].rename(columns={"prediction": dataset.target_column})
-    ordered = dataset.sample_submission[[dataset.id_column]].merge(submission, on=dataset.id_column, how="left")
+    # validate="one_to_one" turns a duplicated/forecast id into a hard error
+    # instead of silently fanning the submission out to the wrong length.
+    ordered = dataset.sample_submission[[dataset.id_column]].merge(
+        submission, on=dataset.id_column, how="left", validate="one_to_one"
+    )
     if ordered[dataset.target_column].isna().any():
         raise ValueError("Submission contains missing predictions after merge. Check id alignment.")
+    if len(ordered) != len(dataset.sample_submission):
+        raise ValueError("Submission row count does not match the sample submission.")
+    target = ordered[dataset.target_column].to_numpy(dtype=np.float64)
+    if not np.isfinite(target).all():
+        raise ValueError("Submission contains non-finite predictions.")
+    if (target < 0).any():
+        raise ValueError("Submission contains negative predictions.")
     ordered[dataset.target_column] = ordered[dataset.target_column].astype("float32")
     return ordered
 
