@@ -215,6 +215,35 @@ def test_holiday_activeness_handles_transferred_and_transfer_rows():
     assert transferred[pd.Timestamp("2017-01-06")] == 1
 
 
+def test_lightgbm_pipeline_end_to_end(tmp_path: Path):
+    pytest.importorskip("lightgbm")
+    dataset = build_dataset(discover_competition_files(_prepare_dir(tmp_path)))
+
+    selection, metrics, _ = fit_and_score_holdout(
+        dataset=dataset,
+        holdout_days=4,
+        recent_train_start="2017-01-01",
+        max_train_rows=5000,
+        candidate_strategies=("seasonal_naive", "lightgbm"),
+        seed=7,
+    )
+    final_model = fit_final_model(
+        dataset=dataset,
+        selection=selection,
+        recent_train_start="2017-01-01",
+        max_train_rows=5000,
+        seed=7,
+    )
+    submission = generate_submission(final_model, dataset=dataset)
+
+    assert {row["name"] for row in metrics["strategy_metrics"]} == {"seasonal_naive", "lightgbm"}
+    assert selection["selected_strategy"] in {"seasonal_naive", "lightgbm"}
+    assert len(submission) == 8
+    assert submission["sales"].ge(0).all()
+    if final_model["selected_strategy"] == "lightgbm":
+        assert final_model.get("model") is not None
+
+
 def test_max_train_rows_keeps_most_recent_dates(tmp_path: Path):
     raw_dir = _prepare_dir(tmp_path)
     dataset = build_dataset(discover_competition_files(raw_dir))
