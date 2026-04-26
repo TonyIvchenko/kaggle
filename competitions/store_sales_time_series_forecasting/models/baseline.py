@@ -145,13 +145,27 @@ def discover_competition_files(raw_dir: Path = DEFAULT_RAW_DIR) -> CompetitionFi
 
 
 def build_dataset(files: CompetitionFiles) -> DatasetBundle:
-    train = pd.read_csv(files.train_path, parse_dates=["date"])
-    test = pd.read_csv(files.test_path, parse_dates=["date"])
-    stores = pd.read_csv(files.stores_path)
-    oil = pd.read_csv(files.oil_path, parse_dates=["date"])
+    # Explicit dtypes keep the 3M-row train file from defaulting to int64/float64
+    # and a duplicated object-dtype ``family`` column, roughly halving its memory.
+    train = pd.read_csv(
+        files.train_path,
+        parse_dates=["date"],
+        dtype={"id": "int32", "store_nbr": "int16", "family": "category", "sales": "float32", "onpromotion": "int32"},
+    )
+    test = pd.read_csv(
+        files.test_path,
+        parse_dates=["date"],
+        dtype={"id": "int32", "store_nbr": "int16", "family": "category", "onpromotion": "int32"},
+    )
+    stores = pd.read_csv(files.stores_path, dtype={"store_nbr": "int16", "cluster": "int16"})
+    oil = pd.read_csv(files.oil_path, parse_dates=["date"], dtype={"dcoilwtico": "float32"})
     holidays = pd.read_csv(files.holidays_path, parse_dates=["date"])
-    transactions = pd.read_csv(files.transactions_path, parse_dates=["date"])
-    sample_submission = pd.read_csv(files.sample_submission_path)
+    transactions = pd.read_csv(
+        files.transactions_path,
+        parse_dates=["date"],
+        dtype={"store_nbr": "int16", "transactions": "int32"},
+    )
+    sample_submission = pd.read_csv(files.sample_submission_path, dtype={"id": "int32", "sales": "float32"})
 
     return DatasetBundle(
         train_frame=train,

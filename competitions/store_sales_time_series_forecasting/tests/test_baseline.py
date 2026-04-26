@@ -215,6 +215,15 @@ def test_holiday_activeness_handles_transferred_and_transfer_rows():
     assert transferred[pd.Timestamp("2017-01-06")] == 1
 
 
+def test_build_dataset_uses_compact_dtypes(tmp_path: Path):
+    dataset = build_dataset(discover_competition_files(_prepare_dir(tmp_path)))
+
+    assert dataset.train_frame["sales"].dtype == np.float32
+    assert dataset.train_frame["store_nbr"].dtype == np.int16
+    assert str(dataset.train_frame["family"].dtype) == "category"
+    assert dataset.test_frame["store_nbr"].dtype == np.int16
+
+
 def test_lightgbm_pipeline_end_to_end(tmp_path: Path):
     pytest.importorskip("lightgbm")
     dataset = build_dataset(discover_competition_files(_prepare_dir(tmp_path)))
