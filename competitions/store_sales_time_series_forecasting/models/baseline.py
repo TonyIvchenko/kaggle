@@ -577,6 +577,11 @@ def _fit_trained_strategy(
             reg_lambda=1.0,
             random_state=seed,
             n_jobs=-1,
+            # Silence the per-tree training chatter and make fits reproducible
+            # regardless of thread count / dataset size.
+            verbose=-1,
+            deterministic=True,
+            force_row_wise=True,
         )
         fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
         if use_early_stopping:
