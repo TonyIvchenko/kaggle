@@ -8,9 +8,11 @@ import pytest
 import numpy as np
 
 from competitions.store_sales_time_series_forecasting.models.baseline import (
+    _active_national_holiday_dates,
     _aggregate_holiday_features,
     _build_base_frame,
     _build_encoders,
+    _holiday_proximity,
     _log_target,
     _prepare_supervised_training_frame,
     _safe_std,
@@ -210,6 +212,24 @@ def test_force_strategy_must_be_a_candidate(tmp_path: Path):
             candidate_strategies=("seasonal_naive",),
             force_strategy="lightgbm",
         )
+
+
+def test_holiday_proximity_measures_distance_to_active_holidays():
+    holidays = pd.DataFrame(
+        [
+            {"date": "2017-01-06", "type": "Holiday", "locale": "National", "locale_name": "Ecuador", "transferred": False},
+            {"date": "2017-01-06", "type": "Holiday", "locale": "National", "locale_name": "Ecuador", "transferred": True},
+        ]
+    )
+    holidays["date"] = pd.to_datetime(holidays["date"])
+    active = _active_national_holiday_dates(holidays)
+    assert active.size == 1  # the transferred duplicate is excluded
+
+    dates = pd.Series(pd.to_datetime(["2017-01-04", "2017-01-06", "2017-01-09"]))
+    days_to_next, days_since_prev = _holiday_proximity(dates, active)
+
+    assert list(days_to_next) == [2.0, 0.0, 60.0]  # before / on / after (capped)
+    assert list(days_since_prev) == [60.0, 0.0, 3.0]
 
 
 def test_holiday_activeness_handles_transferred_and_transfer_rows():

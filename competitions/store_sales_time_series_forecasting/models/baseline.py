@@ -71,6 +71,8 @@ BASE_FEATURE_COLUMNS = [
     "is_month_start",
     "is_month_end",
     "is_payday",
+    "days_to_next_national_holiday",
+    "days_since_prev_national_holiday",
     "national_holiday_count",
     "national_event_count",
     "national_additional_count",
@@ -249,6 +251,49 @@ def _prepare_transaction_profile(dataset: DatasetBundle) -> pd.DataFrame:
     return profile
 
 
+HOLIDAY_PROXIMITY_CAP = 60
+
+
+def _active_national_holiday_dates(holidays: pd.DataFrame) -> np.ndarray:
+    """Dates on which a national holiday actually lands (same rule as the counts)."""
+    national = holidays.loc[holidays["locale"].eq("National")]
+    if national.empty:
+        return np.array([], dtype="datetime64[D]")
+    transferred = national["transferred"].fillna(False).astype(bool)
+    type_col = national["type"].astype("string")
+    active = (type_col.eq("Holiday") & ~transferred) | type_col.eq("Transfer")
+    dates = pd.to_datetime(national.loc[active, "date"]).dropna().drop_duplicates().sort_values()
+    return dates.to_numpy().astype("datetime64[D]")
+
+
+def _holiday_proximity(
+    dates: pd.Series, holiday_dates: np.ndarray, cap: int = HOLIDAY_PROXIMITY_CAP
+) -> tuple[np.ndarray, np.ndarray]:
+    """Signed-free day distance to the next and previous national holiday, capped."""
+    day_index = pd.to_datetime(dates).to_numpy().astype("datetime64[D]").astype("int64")
+    days_to_next = np.full(len(day_index), float(cap), dtype="float32")
+    days_since_prev = np.full(len(day_index), float(cap), dtype="float32")
+    if holiday_dates.size == 0:
+        return days_to_next, days_since_prev
+
+    holiday_index = holiday_dates.astype("int64")
+    # Next holiday at-or-after the date (0 on the holiday itself).
+    next_pos = np.searchsorted(holiday_index, day_index, side="left")
+    has_next = next_pos < holiday_index.size
+    safe_next = np.clip(next_pos, 0, holiday_index.size - 1)
+    days_to_next[has_next] = (holiday_index[safe_next] - day_index).astype("float32")[has_next]
+
+    # Previous holiday at-or-before the date (0 on the holiday itself).
+    prev_pos = np.searchsorted(holiday_index, day_index, side="right") - 1
+    has_prev = prev_pos >= 0
+    safe_prev = np.clip(prev_pos, 0, holiday_index.size - 1)
+    days_since_prev[has_prev] = (day_index - holiday_index[safe_prev]).astype("float32")[has_prev]
+
+    np.clip(days_to_next, 0.0, float(cap), out=days_to_next)
+    np.clip(days_since_prev, 0.0, float(cap), out=days_since_prev)
+    return days_to_next, days_since_prev
+
+
 def _aggregate_holiday_features(
     holidays: pd.DataFrame,
     locale: str,
@@ -347,6 +392,11 @@ def _build_base_frame(frame: pd.DataFrame, dataset: DatasetBundle, encoders: dic
     work["is_month_start"] = date_parts.is_month_start.astype("int8")
     work["is_month_end"] = date_parts.is_month_end.astype("int8")
     work["is_payday"] = date_parts.day.isin([1, 15]).astype("int8")
+
+    national_holiday_dates = _active_national_holiday_dates(dataset.holidays_frame)
+    days_to_next, days_since_prev = _holiday_proximity(work["date"], national_holiday_dates)
+    work["days_to_next_national_holiday"] = days_to_next
+    work["days_since_prev_national_holiday"] = days_since_prev
 
     transaction_profile = _prepare_transaction_profile(dataset)
     work = work.merge(transaction_profile, on=["store_nbr", "dayofweek"], how="left", validate="many_to_one")
