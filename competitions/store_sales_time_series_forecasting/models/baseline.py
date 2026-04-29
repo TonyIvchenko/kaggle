@@ -92,10 +92,17 @@ BASE_FEATURE_COLUMNS = [
 ]
 LAG_FEATURE_COLUMNS = [f"sales_lag_{lag}" for lag in SALES_LAGS]
 ROLL_FEATURE_COLUMNS = [f"sales_roll_mean_{window}" for window in ROLL_WINDOWS]
+ROLL_STD_FEATURE_COLUMNS = [f"sales_roll_std_{window}" for window in ROLL_WINDOWS]
 PROMO_FEATURE_COLUMNS = [f"promo_lag_{lag}" for lag in PROMO_LAGS] + [
     f"promo_roll_mean_{window}" for window in PROMO_ROLL_WINDOWS
 ]
-FEATURE_COLUMNS = [*BASE_FEATURE_COLUMNS, *LAG_FEATURE_COLUMNS, *ROLL_FEATURE_COLUMNS, *PROMO_FEATURE_COLUMNS]
+FEATURE_COLUMNS = [
+    *BASE_FEATURE_COLUMNS,
+    *LAG_FEATURE_COLUMNS,
+    *ROLL_FEATURE_COLUMNS,
+    *ROLL_STD_FEATURE_COLUMNS,
+    *PROMO_FEATURE_COLUMNS,
+]
 
 
 @dataclass(frozen=True)
@@ -366,13 +373,13 @@ def _add_history_features(frame: pd.DataFrame) -> pd.DataFrame:
     for lag in SALES_LAGS:
         work[f"sales_lag_{lag}"] = sales_group.shift(lag).astype("float32")
     shifted_sales = sales_group.shift(1)
+    shifted_sales_group = shifted_sales.groupby(work["group_id"], sort=False, observed=True)
     for window in ROLL_WINDOWS:
         work[f"sales_roll_mean_{window}"] = (
-            shifted_sales.groupby(work["group_id"], sort=False, observed=True)
-            .rolling(window)
-            .mean()
-            .reset_index(level=0, drop=True)
-            .astype("float32")
+            shifted_sales_group.rolling(window).mean().reset_index(level=0, drop=True).astype("float32")
+        )
+        work[f"sales_roll_std_{window}"] = (
+            shifted_sales_group.rolling(window).std().reset_index(level=0, drop=True).astype("float32")
         )
 
     for lag in PROMO_LAGS:
@@ -446,13 +453,24 @@ def _safe_mean(history: deque[float], window: int) -> float:
     return float(np.mean(values))
 
 
+def _safe_std(history: deque[float], window: int) -> float:
+    # Mirror the training-time rolling std (full window, sample ddof=1) so the
+    # recursive forecast sees features on the same scale it was trained on.
+    if len(history) < window:
+        return float("nan")
+    values = list(history)[-window:]
+    return float(np.std(values, ddof=1))
+
+
 def _attach_future_history_features(
     batch: pd.DataFrame,
     sales_histories: dict[tuple[int, str], deque[float]],
     promo_histories: dict[tuple[int, str], deque[float]],
 ) -> pd.DataFrame:
     work = batch.copy()
-    sales_feature_values: dict[str, list[float]] = {column: [] for column in [*LAG_FEATURE_COLUMNS, *ROLL_FEATURE_COLUMNS]}
+    sales_feature_values: dict[str, list[float]] = {
+        column: [] for column in [*LAG_FEATURE_COLUMNS, *ROLL_FEATURE_COLUMNS, *ROLL_STD_FEATURE_COLUMNS]
+    }
     promo_feature_values: dict[str, list[float]] = {column: [] for column in PROMO_FEATURE_COLUMNS}
 
     for row in work.itertuples(index=False):
@@ -464,6 +482,7 @@ def _attach_future_history_features(
             sales_feature_values[f"sales_lag_{lag}"].append(_safe_lag(sales_history, lag))
         for window in ROLL_WINDOWS:
             sales_feature_values[f"sales_roll_mean_{window}"].append(_safe_mean(sales_history, window))
+            sales_feature_values[f"sales_roll_std_{window}"].append(_safe_std(sales_history, window))
         for lag in PROMO_LAGS:
             promo_feature_values[f"promo_lag_{lag}"].append(_safe_lag(promo_history, lag))
         for window in PROMO_ROLL_WINDOWS:

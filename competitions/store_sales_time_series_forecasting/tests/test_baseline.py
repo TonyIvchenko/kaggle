@@ -13,6 +13,7 @@ from competitions.store_sales_time_series_forecasting.models.baseline import (
     _build_encoders,
     _log_target,
     _prepare_supervised_training_frame,
+    _safe_std,
     build_dataset,
     discover_competition_files,
     fit_and_score_holdout,
@@ -153,6 +154,17 @@ def test_transactions_dow_mean_feature_is_populated(tmp_path: Path):
     # The test horizon has no transactions of its own but still gets the profile.
     test_base = _build_base_frame(dataset.test_frame, dataset=dataset, encoders=encoders)
     assert test_base["transactions_dow_mean"].notna().all()
+
+
+def test_safe_std_matches_pandas_full_window():
+    from collections import deque
+
+    history = deque([1.0, 3.0, 5.0, 9.0])
+    # Fewer than `window` observations -> NaN, matching training rolling std.
+    assert np.isnan(_safe_std(history, window=5))
+    # Full window -> sample std (ddof=1) over the most recent values.
+    expected = pd.Series([3.0, 5.0, 9.0]).std()
+    assert _safe_std(history, window=3) == pytest.approx(expected)
 
 
 def test_log_target_clips_negatives_and_stays_finite():
