@@ -130,6 +130,11 @@ def test_holdout_and_submission(tmp_path: Path):
 
     assert selection["selected_strategy"] == "seasonal_naive"
     assert "rmsle" in metrics and "mae" in metrics
+    # Holdout window + row counts are recorded for transparency.
+    assert metrics["holdout_start"] == "2017-01-25"
+    assert metrics["holdout_end"] == "2017-01-28"
+    assert metrics["holdout_rows"] > 0
+    assert metrics["supervised_rows"] > 0
     assert list(holdout_predictions.columns) == ["id", "date", "store_nbr", "family", "actual", "prediction"]
     assert list(submission.columns) == ["id", "sales"]
     assert len(submission) == 8

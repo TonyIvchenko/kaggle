@@ -793,10 +793,16 @@ def fit_and_score_holdout(
         "candidate_strategies": list(candidate_strategies),
         "feature_columns": list(FEATURE_COLUMNS),
     }
+    holdout_end = pd.Timestamp(train_dates[-1])
     holdout_metrics = {
         "selected_strategy": selected_strategy,
         "rmsle": float(selected_metrics["rmsle"]),
         "mae": float(selected_metrics["mae"]),
+        "holdout_start": str(holdout_start.date()),
+        "holdout_end": str(holdout_end.date()),
+        "history_rows": int(len(train_history)),
+        "holdout_rows": int(len(holdout_future)),
+        "supervised_rows": int(len(supervised_train)),
         "strategy_metrics": strategy_metrics,
     }
     holdout_predictions = selected_predictions.loc[
