@@ -1,0 +1,13 @@
+[tool.pytest.ini_options]
+minversion = "7.0"
+# Make `competitions` importable regardless of the working directory pytest is
+# launched from, and default test discovery to the competition workspaces.
+pythonpath = ["."]
+testpaths = ["competitions"]
+filterwarnings = [
+    # pytest's own assertion rewriter trips these on Python 3.13; they are not
+    # actionable from this repo, so keep the test output readable.
+    "ignore:ast.Str is deprecated:DeprecationWarning",
+    "ignore:ast.Num is deprecated:DeprecationWarning",
+    "ignore:Attribute s is deprecated:DeprecationWarning",
+]
