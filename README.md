@@ -7,6 +7,7 @@ Workspace for KAggle experiments
 - `requirements.txt`: shared dependencies
 - `environment.yml`: conda environment with `requirements.txt`
 - `Makefile`: setup/update helpers with Jupyter kernel registration
+- `pyproject.toml`: pytest configuration (test paths, import path, warning filters)
 
 ## Setup
 
@@ -41,6 +42,17 @@ make clean
 ```
 
 Deletes files under `data/raw`, `data/processed` and `submissions` folders, deleted non-Python files under `models`
+
+## Run tests
+
+```bash
+make test
+```
+
+Runs `pytest` in the `kaggle` conda environment. Pass a path or flags with
+`args`, e.g. `make test args="competitions/store_sales_time_series_forecasting -q"`.
+Test discovery, the import path, and warning filters are configured in
+`pyproject.toml`, so plain `pytest` works too.
 
 ## Kaggle API Auth
 
