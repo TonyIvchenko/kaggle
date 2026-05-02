@@ -290,6 +290,37 @@ def test_lightgbm_pipeline_end_to_end(tmp_path: Path):
         assert final_model.get("model") is not None
 
 
+def test_blend_strategy_averages_lightgbm_and_xgboost(tmp_path: Path):
+    pytest.importorskip("lightgbm")
+    pytest.importorskip("xgboost")
+    dataset = build_dataset(discover_competition_files(_prepare_dir(tmp_path)))
+
+    selection, metrics, _ = fit_and_score_holdout(
+        dataset=dataset,
+        holdout_days=4,
+        recent_train_start="2017-01-01",
+        max_train_rows=5000,
+        candidate_strategies=("blend",),
+        seed=7,
+        force_strategy="blend",
+    )
+    final_model = fit_final_model(
+        dataset=dataset,
+        selection=selection,
+        recent_train_start="2017-01-01",
+        max_train_rows=5000,
+        seed=7,
+    )
+    submission = generate_submission(final_model, dataset=dataset)
+
+    assert selection["selected_strategy"] == "blend"
+    assert {row["name"] for row in metrics["strategy_metrics"]} == {"blend"}
+    # The blend keeps both base learners around for averaging at predict time.
+    assert len(final_model["models"]) == 2
+    assert len(submission) == 8
+    assert submission["sales"].ge(0).all()
+
+
 def test_max_train_rows_keeps_most_recent_dates(tmp_path: Path):
     raw_dir = _prepare_dir(tmp_path)
     dataset = build_dataset(discover_competition_files(raw_dir))

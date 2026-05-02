@@ -610,27 +610,29 @@ def _time_validation_split(
     return train_part, valid_part
 
 
-def _fit_trained_strategy(
-    train_frame: pd.DataFrame,
-    strategy: str,
+BLEND_STRATEGY = "blend"
+BLEND_MEMBERS = ("lightgbm", "xgboost")
+
+
+def _strategy_members(strategy: str) -> tuple[str, ...]:
+    """The base learner(s) a trained strategy is composed of."""
+    if strategy == BLEND_STRATEGY:
+        return BLEND_MEMBERS
+    if strategy in BLEND_MEMBERS:
+        return (strategy,)
+    raise ValueError(f"Unsupported trained strategy: {strategy}")
+
+
+def _fit_single_gbm(
+    member: str,
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    sample_weight: np.ndarray,
+    eval_set: list[tuple[pd.DataFrame, np.ndarray]] | None,
+    use_early_stopping: bool,
     seed: int,
-) -> dict[str, Any]:
-    # Compute fill values on the full frame so train/validation share the same
-    # imputation, then carve off the most recent days for early stopping.
-    fill_values = _training_fill_values(train_frame)
-    fit_frame, valid_frame = _time_validation_split(train_frame, EARLY_STOPPING_VALID_DAYS)
-    use_early_stopping = not valid_frame.empty
-
-    x_train = _feature_matrix(fit_frame, fill_values=fill_values)
-    y_train = _log_target(fit_frame["sales"].to_numpy())
-    sample_weight = _recent_sample_weight(fit_frame)
-    eval_set = None
-    if use_early_stopping:
-        x_valid = _feature_matrix(valid_frame, fill_values=fill_values)
-        y_valid = _log_target(valid_frame["sales"].to_numpy())
-        eval_set = [(x_valid, y_valid)]
-
-    if strategy == "lightgbm":
+) -> Any:
+    if member == "lightgbm":
         if not _lightgbm_available():
             raise RuntimeError("lightgbm strategy selected but lightgbm is not installed.")
         model = lgb.LGBMRegressor(
@@ -660,7 +662,9 @@ def _fit_trained_strategy(
                 lgb.log_evaluation(0),
             ]
         model.fit(x_train, y_train, **fit_kwargs)
-    elif strategy == "xgboost":
+        return model
+
+    if member == "xgboost":
         if not _xgboost_available():
             raise RuntimeError("xgboost strategy selected but xgboost is not installed.")
         xgb_params: dict[str, Any] = dict(
@@ -685,14 +689,51 @@ def _fit_trained_strategy(
             fit_kwargs["eval_set"] = eval_set
             fit_kwargs["verbose"] = False
         model.fit(x_train, y_train, **fit_kwargs)
-    else:
-        raise ValueError(f"Unsupported trained strategy: {strategy}")
+        return model
+
+    raise ValueError(f"Unsupported base learner: {member}")
+
+
+def _fit_trained_strategy(
+    train_frame: pd.DataFrame,
+    strategy: str,
+    seed: int,
+) -> dict[str, Any]:
+    members = _strategy_members(strategy)
+    # Compute fill values on the full frame so train/validation share the same
+    # imputation, then carve off the most recent days for early stopping.
+    fill_values = _training_fill_values(train_frame)
+    fit_frame, valid_frame = _time_validation_split(train_frame, EARLY_STOPPING_VALID_DAYS)
+    use_early_stopping = not valid_frame.empty
+
+    x_train = _feature_matrix(fit_frame, fill_values=fill_values)
+    y_train = _log_target(fit_frame["sales"].to_numpy())
+    sample_weight = _recent_sample_weight(fit_frame)
+    eval_set = None
+    if use_early_stopping:
+        x_valid = _feature_matrix(valid_frame, fill_values=fill_values)
+        y_valid = _log_target(valid_frame["sales"].to_numpy())
+        eval_set = [(x_valid, y_valid)]
+
+    models = [
+        _fit_single_gbm(
+            member,
+            x_train=x_train,
+            y_train=y_train,
+            sample_weight=sample_weight,
+            eval_set=eval_set,
+            use_early_stopping=use_early_stopping,
+            seed=seed,
+        )
+        for member in members
+    ]
 
     return {
         "selected_strategy": strategy,
         "feature_columns": list(FEATURE_COLUMNS),
         "fill_values": fill_values,
-        "model": model,
+        "models": models,
+        "model": models[0],
     }
 
 
@@ -721,7 +762,10 @@ def _predict_future(
 
     strategy = str(strategy_bundle["selected_strategy"])
     fill_values = dict(strategy_bundle.get("fill_values", {}))
-    model = strategy_bundle.get("model")
+    models = strategy_bundle.get("models")
+    if models is None:
+        single_model = strategy_bundle.get("model")
+        models = [single_model] if single_model is not None else []
 
     for current_date, date_batch in ordered_future.groupby("date", sort=True):
         batch = _attach_future_history_features(date_batch, sales_histories=sales_histories, promo_histories=promo_histories)
@@ -729,7 +773,13 @@ def _predict_future(
             prediction = _seasonal_naive_prediction(batch)
         else:
             matrix = _feature_matrix(batch, fill_values=fill_values)
-            prediction = np.expm1(np.asarray(model.predict(matrix), dtype=np.float32))
+            # Average the base learners in log space (a geometric mean of the
+            # back-transformed forecasts), then invert the log1p target.
+            log_prediction = np.mean(
+                [np.asarray(model.predict(matrix), dtype=np.float32) for model in models],
+                axis=0,
+            )
+            prediction = np.expm1(log_prediction)
             prediction = np.clip(prediction, 0.0, None)
 
         batch["prediction"] = prediction.astype("float32")
@@ -895,6 +945,7 @@ def fit_final_model(
         "feature_columns": list(FEATURE_COLUMNS),
         "encoders": encoders,
         "fill_values": trained["fill_values"],
+        "models": trained["models"],
         "model": trained["model"],
         "seed": int(seed),
     }
